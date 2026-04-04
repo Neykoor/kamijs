@@ -8,10 +8,11 @@ export class EconomyManager {
             if (!char) throw new Error('CHARACTER_NOT_FOUND');
             if (char.owner_id !== null) throw new Error('ALREADY_CLAIMED');
 
+            
             const userUpdate = await db.run(`
                 UPDATE users 
-                SET yenes = yenes - ?, stress_level = 0, last_interaction = ? 
-                WHERE jid = ? AND yenes >= ?
+                SET balance = balance - ?, stress_level = 0, last_interaction = ? 
+                WHERE jid = ? AND balance >= ?
             `, [char.value, Date.now(), jid, char.value]);
 
             if (userUpdate.changes === 0) {
