@@ -4,9 +4,10 @@
   "type": "module",
   "main": "src/index.js",
   "dependencies": {
+    "fs-extra": "^11.2.0",
     "lidsync": "git+https://github.com/Neykoor/LidSync.git",
-    "sqlite3": "^5.1.7",
     "node-fetch": "^3.3.2",
-    "fs-extra": "^11.2.0"
+    "sqlite": "^5.1.1",
+    "sqlite3": "^5.1.7"
   }
 }
