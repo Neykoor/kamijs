@@ -10,8 +10,8 @@ import fs from 'fs-extra';
 
 export class Kamijs {
     constructor(config = {}) {
-        this.dbPath = config.dbPath || './gacha.db';
-        this.jsonPath = config.jsonPath || './characters.json';
+        this.dbPath = config.dbPath || './database/gacha.db';
+        this.jsonPath = config.jsonPath || './database/characters.json';
         this.currency = config.currency || 'yenes';
         this.db = null;
         this.cooldowns = new Cooldowns();
@@ -43,21 +43,58 @@ export class Kamijs {
         `);
         
         if (!fs.existsSync(this.jsonPath)) {
+            await fs.ensureDir('./database');
             await fs.writeJson(this.jsonPath, { characters: [] });
         }
     }
 
+    // Agrega un solo personaje (útil para comandos de admin)
     async addCharacter(data) {
-        const { id, name, series, gender, booru_tag, value = 3000 } = data;
+        const { id, name, series, booru_tag, value = 3000 } = data;
+        if (!id || !name || !series || !booru_tag) throw new Error('MISSING_REQUIRED_FIELDS');
+
         await this.db.run(
-            "INSERT OR IGNORE INTO characters (id, name, series, gender, booru_tag, value) VALUES (?, ?, ?, ?, ?, ?)",
-            [id, name, series, gender, booru_tag, value]
+            "INSERT OR IGNORE INTO characters (id, name, series, booru_tag, value) VALUES (?, ?, ?, ?, ?)",
+            [id, name, series, booru_tag, value]
         );
         
         const backup = await fs.readJson(this.jsonPath);
         if (!backup.characters.find(c => c.id === id)) {
-            backup.characters.push({ id, name, series, gender, booru_tag, value });
+            backup.characters.push(data);
             await fs.writeJson(this.jsonPath, backup, { spaces: 2 });
+        }
+    }
+
+    // Carga masiva optimizada (para el seeder)
+    async bulkAddCharacters(dataArray) {
+        if (!Array.isArray(dataArray)) throw new Error('INVALID_ARRAY');
+
+        await this.db.run("BEGIN IMMEDIATE");
+        const backup = await fs.readJson(this.jsonPath);
+        let addedCount = 0;
+
+        try {
+            for (const char of dataArray) {
+                // Validación preventiva
+                if (!char.id || !char.name || !char.series || !char.booru_tag) continue;
+
+                const result = await this.db.run(
+                    "INSERT OR IGNORE INTO characters (id, name, series, booru_tag, value) VALUES (?, ?, ?, ?, ?)",
+                    [char.id, char.name, char.series, char.booru_tag, char.value || 3000]
+                );
+
+                if (result.changes > 0 && !backup.characters.find(c => c.id === char.id)) {
+                    backup.characters.push(char);
+                    addedCount++;
+                }
+            }
+
+            await this.db.run("COMMIT");
+            if (addedCount > 0) await fs.writeJson(this.jsonPath, backup, { spaces: 2 });
+            return addedCount;
+        } catch (e) {
+            await this.db.run("ROLLBACK").catch(() => {});
+            throw e;
         }
     }
 
@@ -91,6 +128,7 @@ export class Kamijs {
         const { sql, params } = MercyIA.getRollQuery(isPity, user.balance);
         let char = await this.db.get(sql, params);
 
+        // Fallback: Si el pity falla (usuario pobre), dar un roll normal
         if (!char && isPity) {
             const normalRoll = MercyIA.getRollQuery(false, 0);
             char = await this.db.get(normalRoll.sql, normalRoll.params);
