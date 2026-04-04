@@ -1,4 +1,10 @@
 export class MercyIA {
+    static CONFIG = {
+        EROSION_HOURS: 2,
+        PITY_THRESHOLD: 3,
+        INTERVENTION_CHANCE: 0.4
+    };
+
     static async getProcessedUser(db, jid) {
         let user = await db.get("SELECT * FROM users WHERE jid = ?", [jid]);
         if (!user) return null;
@@ -7,7 +13,7 @@ export class MercyIA {
         const lastInteraction = user.last_interaction || now; 
         const hoursSinceLast = (now - lastInteraction) / (1000 * 60 * 60);
 
-        const erosion = Math.floor(hoursSinceLast / 2);
+        const erosion = Math.floor(hoursSinceLast / this.CONFIG.EROSION_HOURS);
         
         if (erosion > 0 && user.stress_level > 0) {
             user.stress_level = Math.max(0, user.stress_level - erosion);
@@ -18,7 +24,8 @@ export class MercyIA {
     }
 
     static shouldIntervene(user) {
-        return user && user.stress_level >= 3 && Math.random() < 0.4;
+        if (!user || user.stress_level < this.CONFIG.PITY_THRESHOLD) return false;
+        return Math.random() < this.CONFIG.INTERVENTION_CHANCE;
     }
 
     static getRollQuery(isPity, userBalance) {
