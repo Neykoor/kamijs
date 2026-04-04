@@ -1,13 +1,14 @@
 # ✨ kamijs
 
-> Motor de Gacha con economía, IA de Compasión y seguridad transaccional para bots de WhatsApp.
+> Motor de Gacha con economía, trades, IA de Compasión y seguridad transaccional para bots de WhatsApp.
 
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green?style=flat-square&logo=node.js)](https://nodejs.org)
-[![SQLite](https://img.shields.io/badge/SQLite-3-blue?style=flat-square&logo=sqlite)](https://sqlite.org)
+[![SQLite](https://img.shields.io/badge/SQLite-WAL-blue?style=flat-square&logo=sqlite)](https://sqlite.org)
 [![LidSync](https://img.shields.io/badge/LidSync-integrado-purple?style=flat-square)](https://github.com/Neykoor/LidSync)
+[![npm](https://img.shields.io/badge/npm-próximamente-lightgrey?style=flat-square&logo=npm)](https://github.com/Neykoor/kamijs)
 [![License](https://img.shields.io/badge/Licencia-MIT-yellow?style=flat-square)](LICENSE)
 
-**kamijs** es una librería modular y de alto rendimiento diseñada para implementar sistemas Gacha con economía y mercado abierto en bots de WhatsApp basados en [Baileys](https://github.com/WhiskeySockets/Baileys). Cuenta con transacciones seguras en SQLite, un sistema de IA de Compasión (Pity Adaptativo) y prevención nativa de duplicidad de usuarios mediante [LidSync](https://github.com/Neykoor/LidSync).
+**kamijs** es una librería modular y de alto rendimiento diseñada para implementar sistemas Gacha con economía y mercado abierto en bots de WhatsApp basados en [Baileys](https://github.com/WhiskeySockets/Baileys). Cuenta con transacciones seguras en SQLite (modo WAL), un sistema de IA de Compasión (Pity Adaptativo), trades entre usuarios y normalización automática de JIDs mediante [LidSync](https://github.com/Neykoor/LidSync).
 
 ---
 
@@ -15,11 +16,13 @@
 
 | Característica | Descripción |
 |---|---|
-| 🧠 **IA de Compasión** | Evalúa el estrés del usuario y su billetera para inclinar sutilmente la balanza en rolls futuros |
-| 🛡️ **Transacciones Atómicas** | `BEGIN IMMEDIATE` en SQLite elimina race conditions en claims simultáneos |
+| 🧠 **IA de Compasión** | Evalúa el estrés del usuario y su saldo para inclinar sutilmente la balanza en rolls futuros |
+| 🛡️ **Transacciones Atómicas** | `BEGIN IMMEDIATE` + modo WAL en SQLite elimina race conditions en claims simultáneos |
+| 🔄 **Sistema de Trades** | Intercambio de personajes entre usuarios con expiración automática (5 min) y verificación en transacción |
 | 🖼️ **Imágenes Dinámicas** | Genera URLs aleatorias en tiempo real desde Yande.re usando tags de booru |
 | ⏱️ **Cooldowns en Memoria** | Sistema de verificación y confirmación en dos pasos, sin escrituras en disco |
 | 🧬 **LidGuard Integrado** | Normaliza automáticamente todos los JIDs para mantener la base de datos limpia |
+| 💱 **Moneda Personalizable** | Configura el nombre de la moneda del juego (`yenes`, `coins`, `rubíes`, etc.) |
 
 ---
 
@@ -40,7 +43,7 @@ O agrega manualmente a tu `package.json`:
 }
 ```
 
-> **Requisito:** El socket de Baileys debe tener [LidSync](https://github.com/Neykoor/LidSync) aplicado antes de pasarlo a kamijs. Ver sección de integración.
+> **Requisito:** El socket de Baileys debe tener [LidSync](https://github.com/Neykoor/LidSync) aplicado antes de pasarlo a kamijs. Ver [sección de integración](#-integración-con-lidsync).
 
 ---
 
@@ -53,7 +56,8 @@ import { Kamijs } from 'kamijs';
 
 const gacha = new Kamijs({
     dbPath: './database/gacha.db',
-    jsonPath: './database/characters.json'
+    jsonPath: './database/characters.json',
+    currency: 'yenes'          // Nombre de la moneda (opcional, default: 'yenes')
 });
 
 await gacha.init();
@@ -70,7 +74,7 @@ if (result.error === 'NOT_FOUND') return reply(`❌ No hay personajes disponible
 try {
     await sock.sendMessage(m.chat, {
         image: { url: result.imageUrl },
-        caption: `🌟 *${result.name}*\n💰 ${result.value} Yenes`
+        caption: `🌟 *${result.name}*\n💰 ${result.value} ${result.currencyName}`
     });
 
     // CRÍTICO: Solo confirmar si el mensaje se envió con éxito
@@ -93,12 +97,43 @@ try {
         await gacha.reportMissedClaim(sock, m.sender);
         reply('❌ Alguien fue más rápido que tú.');
     } else if (err.message === 'INSUFFICIENT_FUNDS') {
-        reply('💸 No tienes suficientes Yenes.');
+        reply('💸 No tienes suficiente saldo.');
+    } else if (err.message === 'CHARACTER_NOT_FOUND') {
+        reply('❓ Personaje no encontrado.');
     }
 }
 ```
 
-### 4. Agregar Personaje (`#addchar`)
+### 4. Trade (`#trade`)
+
+```js
+// Proponer un intercambio
+const trade = await gacha.proposeTrade(sock, m.sender, targetJid, offeredCharId, requestedCharId);
+if (trade.error === 'COOLDOWN') return reply(`⏳ Espera ${trade.remaining}s.`);
+
+reply(`🔄 Trade *${trade.trade.id}* enviado. El destinatario tiene 5 minutos para confirmar.`);
+
+// Confirmar (el destinatario)
+await gacha.confirmTrade(sock, m.sender, tradeId);
+reply('✅ ¡Trade completado!');
+
+// Cancelar (cualquiera de los dos)
+gacha.cancelTrade(sock, m.sender, tradeId);
+reply('❌ Trade cancelado.');
+```
+
+### 5. Perfil de usuario (`#perfil`)
+
+```js
+const profile = await gacha.getUserProfile(sock, m.sender);
+reply(
+    `💼 *Perfil*\n` +
+    `💰 Saldo: ${profile.balance} ${profile.currencyName}\n` +
+    `🎴 Personajes: ${profile.characters.length}`
+);
+```
+
+### 6. Agregar Personaje (`#addchar`)
 
 ```js
 await gacha.addCharacter({
@@ -116,7 +151,7 @@ await gacha.addCharacter({
 ## 📚 Referencia de API
 
 ### `await gacha.init()`
-Crea las tablas en SQLite y el archivo `characters.json` si no existen. Debe llamarse una vez al arrancar el bot.
+Crea las tablas en SQLite, activa el modo WAL y genera `characters.json` si no existe. Debe llamarse una vez al arrancar el bot.
 
 ---
 
@@ -129,6 +164,7 @@ Ejecuta un roll del gacha para el usuario.
     id: 'char_001',
     name: 'Marin Kitagawa',
     value: 3500,
+    currencyName: 'yenes',
     imageUrl: 'https://...',
     pityActive: false,
     resolvedJid: '521234567890@s.whatsapp.net'
@@ -137,28 +173,77 @@ Ejecuta un roll del gacha para el usuario.
 
 **Errores:**
 ```js
-{ error: 'COOLDOWN', remaining: 42 }  // segundos restantes
-{ error: 'NOT_FOUND' }                // pool vacío
+{ error: 'COOLDOWN', remaining: 42 }
+{ error: 'NOT_FOUND' }
 ```
 
 ---
 
 ### `gacha.confirmRoll(resolvedJid)`
-Método **síncrono**. Aplica el cooldown al usuario. Debe llamarse **únicamente** después de que el mensaje se haya enviado con éxito a WhatsApp.
+Método **síncrono**. Aplica el cooldown al usuario. Debe llamarse **únicamente** después de que el mensaje se haya enviado exitosamente a WhatsApp.
 
 ---
 
 ### `await gacha.claim(sock, jid, charId)`
-Intenta comprar un personaje. Usa `BEGIN IMMEDIATE` para garantizar que no haya dos claims simultáneos del mismo personaje.
+Intenta comprar un personaje. Usa `BEGIN IMMEDIATE` para garantizar atomicidad ante claims simultáneos.
+
+**Retorna:** `{ success: true, characterValue, characterId }`
 
 **Throws:**
+- `CHARACTER_NOT_FOUND` — el personaje no existe
 - `ALREADY_CLAIMED` — el personaje ya tiene dueño
-- `INSUFFICIENT_FUNDS` — el usuario no tiene saldo suficiente
+- `INSUFFICIENT_FUNDS` — saldo insuficiente
 
 ---
 
 ### `await gacha.reportMissedClaim(sock, jid)`
-Incrementa el `stress_level` del usuario en 1 (máximo 5). Debe llamarse cuando el usuario pierde un claim ante otro jugador, para que la IA de Compasión lo detecte en el próximo roll.
+Incrementa el `stress_level` del usuario en 1 (máximo 5). Llámalo cuando el usuario pierde un claim ante otro jugador para activar la IA de Compasión.
+
+---
+
+### `await gacha.getUserProfile(sock, jid)`
+Obtiene el perfil completo del usuario.
+
+**Retorna:**
+```js
+{
+    balance: 12500,
+    currencyName: 'yenes',
+    characters: [
+        { id: 'char_001', name: 'Marin Kitagawa', series: 'Sono Bisque Doll', value: 3500 },
+        ...
+    ]
+}
+```
+
+---
+
+### `await gacha.proposeTrade(sock, proposerJid, targetJid, offeredCharId, requestedCharId)`
+Crea una propuesta de intercambio entre dos usuarios. El trade expira automáticamente en **5 minutos**.
+
+**Retorna:** `{ success: true, trade: { id, proposerJid, targetJid, offeredCharId, requestedCharId, expiresAt } }`
+
+**Throws:**
+- `SELF_TRADE` — el usuario intenta hacer trade consigo mismo
+- `OFFERED_CHAR_NOT_OWNED` — el personaje ofrecido no pertenece al proponente
+- `REQUESTED_CHAR_NOT_OWNED` — el personaje solicitado no pertenece al destinatario
+
+> ⚠️ Los trades activos se almacenan en memoria. Si el bot se reinicia, los trades pendientes se pierden.
+
+---
+
+### `await gacha.confirmTrade(sock, targetJid, tradeId)`
+El destinatario confirma el trade. Ejecuta el intercambio en una transacción atómica con verificación de propiedad al momento de confirmar.
+
+**Throws:**
+- `TRADE_NOT_FOUND_OR_EXPIRED`
+- `UNAUTHORIZED_CONFIRMATION`
+- `OWNERSHIP_CHANGED_DURING_TRADE` — algún personaje cambió de dueño mientras el trade estaba pendiente
+
+---
+
+### `gacha.cancelTrade(sock, jid, tradeId)`
+Cancela un trade activo. Puede ser llamado por cualquiera de los dos participantes.
 
 ---
 
@@ -179,7 +264,7 @@ Añade un personaje a SQLite y lo respalda en `characters.json`.
 ---
 
 ### `await gacha.bulkImport(characters[])` *(próximamente)*
-Método optimizado para cargar miles de personajes en una sola transacción SQL, sin reescribir el JSON en cada inserción. Ideal para migrar catálogos existentes.
+Método optimizado para cargar miles de personajes en una sola transacción SQL, sin reescribir el JSON en cada inserción.
 
 ---
 
@@ -188,22 +273,32 @@ Método optimizado para cargar miles de personajes en una sola transacción SQL,
 ### `characters`
 | Campo | Tipo | Descripción |
 |---|---|---|
-| `id` | TEXT PK | Identificador único del personaje |
+| `id` | TEXT PK | Identificador único |
 | `name` | TEXT | Nombre del personaje |
 | `series` | TEXT | Serie o franquicia |
 | `gender` | TEXT | Género |
 | `booru_tag` | TEXT | Tag para búsqueda en Yande.re |
-| `value` | INTEGER | Precio en Yenes (default: 3000) |
-| `owner_id` | TEXT | JID del dueño actual (`NULL` si está libre) |
+| `value` | INTEGER | Precio (default: 3000) |
+| `owner_id` | TEXT | JID del dueño (`NULL` si libre) |
 | `votes` | INTEGER | Votos de popularidad |
 
 ### `users`
 | Campo | Tipo | Descripción |
 |---|---|---|
-| `jid` | TEXT PK | JID normalizado del usuario |
-| `yenes` | INTEGER | Saldo actual |
-| `stress_level` | INTEGER | Nivel de estrés 0–5 (alimenta la IA de Compasión) |
-| `last_interaction` | INTEGER | Timestamp del último roll (para decaimiento de estrés) |
+| `jid` | TEXT PK | JID normalizado |
+| `balance` | INTEGER | Saldo actual (default: 0) |
+| `stress_level` | INTEGER | Nivel de estrés 0–5 |
+| `last_interaction` | INTEGER | Timestamp del último roll |
+
+### `trade_history`
+| Campo | Tipo | Descripción |
+|---|---|---|
+| `id` | TEXT PK | ID del trade |
+| `proposer_jid` | TEXT | JID del proponente |
+| `target_jid` | TEXT | JID del destinatario |
+| `offered_char` | TEXT | ID del personaje ofrecido |
+| `requested_char` | TEXT | ID del personaje solicitado |
+| `timestamp` | INTEGER | Fecha de ejecución |
 
 ---
 
@@ -211,39 +306,44 @@ Método optimizado para cargar miles de personajes en una sola transacción SQL,
 
 El Mercy System de kamijs no es un pity de rareza clásico. Es un **pity de disponibilidad y billetera**.
 
-**¿Cómo funciona?**
-
-1. Cada vez que un usuario pierde un claim (`reportMissedClaim`), su `stress_level` sube.
-2. Si el estrés llega a 3 o más, la IA tiene un 40% de probabilidad de intervenir en el próximo roll.
-3. Cuando interviene, el roll filtra solo personajes **libres** y con `value <= saldo del usuario`, garantizando que el resultado sea alcanzable.
-4. El estrés **decae naturalmente**: por cada 2 horas de inactividad, baja 1 punto. Un usuario que abandona el juego pierde su ventaja acumulada.
+1. Cada vez que un usuario pierde un claim, su `stress_level` sube (`reportMissedClaim`).
+2. Con estrés ≥ 3, la IA tiene un **40% de probabilidad** de intervenir en el próximo roll.
+3. Cuando interviene, el roll filtra solo personajes **libres** con `value ≤ saldo del usuario`.
+4. El estrés **decae naturalmente**: cada 2 horas de inactividad baja 1 punto.
 
 ---
 
 ## 🔗 Integración con LidSync
 
-kamijs requiere que el socket de Baileys tenga LidSync aplicado para normalizar JIDs correctamente.
-
 ```js
+import { connectToWhatsApp } from './connection.js';
 import { pluginLid } from 'lidsync';
 import store from './lib/store.js';
 import { Kamijs } from 'kamijs';
 
-let sock = await connectToWhatsApp();
-store.bind(sock.ev);
-sock = pluginLid(sock, { store });
+async function start() {
+    let sock = await connectToWhatsApp();
+    store.bind(sock.ev);
+    sock = pluginLid(sock, { store });
 
-const gacha = new Kamijs({ dbPath: './gacha.db' });
-await gacha.init();
+    const gacha = new Kamijs({
+        dbPath: './database/gacha.db',
+        currency: 'yenes'
+    });
+    await gacha.init();
+
+    // gacha disponible en todos tus plugins via ctx o global
+}
 ```
 
 ---
 
 ## ⚠️ Consideraciones
 
-- **Socket requerido:** Todos los métodos que reciben `jid` también requieren `sock` para resolver LIDs a través de LidSync.
-- **Imágenes:** Las URLs de Yande.re son dinámicas. El mismo personaje puede mostrar una imagen diferente en cada roll. Esto es intencional.
-- **Importaciones masivas:** `addCharacter` no está optimizado para bulk. Usa `bulkImport()` cuando esté disponible.
+- **Socket requerido:** Todos los métodos con `jid` requieren `sock` para resolver LIDs vía LidSync.
+- **Trades en memoria:** Los trades pendientes se pierden si el proceso se reinicia.
+- **Imágenes dinámicas:** El mismo personaje puede mostrar imagen diferente en cada roll. Es intencional.
+- **Importaciones masivas:** `addCharacter` no está optimizado para bulk. Espera `bulkImport()`.
 
 ---
 
