@@ -1,0 +1,12 @@
+{
+  "name": "kamijs",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "src/index.js",
+  "dependencies": {
+    "lidsync": "git+https://github.com/Neykoor/LidSync.git",
+    "sqlite3": "^5.1.7",
+    "node-fetch": "^3.3.2",
+    "fs-extra": "^11.2.0"
+  }
+}
