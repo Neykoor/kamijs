@@ -2,6 +2,7 @@ import { LidGuard } from './middleware/LidGuard.js';
 import { ImageProvider } from './core/ImageProvider.js';
 import { MercyIA } from './core/MercyIA.js';
 import { EconomyManager } from './core/EconomyManager.js';
+import { TradeManager } from './core/TradeManager.js';
 import { Cooldowns } from './utils/Cooldowns.js';
 import sqlite3 from 'sqlite3';
 import { open } from 'sqlite';
@@ -34,6 +35,10 @@ export class Kamijs {
             CREATE TABLE IF NOT EXISTS users (
                 jid TEXT PRIMARY KEY, balance INTEGER DEFAULT 0, 
                 stress_level INTEGER DEFAULT 0, last_interaction INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS trade_history (
+                id TEXT PRIMARY KEY, proposer_jid TEXT, target_jid TEXT, 
+                offered_char TEXT, requested_char TEXT, timestamp INTEGER
             );
         `);
         
@@ -103,5 +108,48 @@ export class Kamijs {
 
     confirmRoll(resolvedJid) {
         this.cooldowns.confirm(resolvedJid);
+    }
+
+    async getUserProfile(sock, rawJid) {
+        const jid = await LidGuard.clean(sock, rawJid);
+        
+        let user = await this.db.get("SELECT balance FROM users WHERE jid = ?", [jid]);
+        if (!user) return { balance: 0, characters: [], currencyName: this.currency };
+
+        const characters = await this.db.all(
+            "SELECT id, name, series, value FROM characters WHERE owner_id = ? ORDER BY value DESC", 
+            [jid]
+        );
+
+        return {
+            balance: user.balance,
+            currencyName: this.currency,
+            characters: characters
+        };
+    }
+
+    async proposeTrade(sock, proposerRawJid, targetRawJid, offeredCharId, requestedCharId) {
+        const proposerJid = await LidGuard.clean(sock, proposerRawJid);
+        const targetJid = await LidGuard.clean(sock, targetRawJid);
+
+        const cd = this.cooldowns.isReady(proposerJid, 'trade_propose', 60);
+        if (!cd.ready) return { error: 'COOLDOWN', remaining: cd.remaining };
+
+        const trade = await TradeManager.initiate(this.db, proposerJid, targetJid, offeredCharId, requestedCharId);
+        this.cooldowns.confirm(proposerJid, 'trade_propose');
+        
+        return { success: true, trade };
+    }
+
+    async confirmTrade(sock, targetRawJid, tradeId) {
+        const targetJid = await LidGuard.clean(sock, targetRawJid);
+        await TradeManager.confirm(this.db, tradeId, targetJid);
+        return { success: true };
+    }
+
+    async cancelTrade(sock, rawJid, tradeId) {
+        const jid = await LidGuard.clean(sock, rawJid);
+        TradeManager.cancel(tradeId, jid);
+        return { success: true };
     }
 }
