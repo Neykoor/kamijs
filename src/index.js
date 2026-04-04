@@ -64,8 +64,8 @@ export class Kamijs {
     async reportMissedClaim(sock, rawJid) {
         const jid = await LidGuard.clean(sock, rawJid);
         await this.db.run(
-            "UPDATE users SET stress_level = MIN(stress_level + 1, 5) WHERE jid = ?", 
-            [jid]
+            "UPDATE users SET stress_level = MIN(stress_level + 1, 5), last_interaction = ? WHERE jid = ?", 
+            [Date.now(), jid]
         );
     }
 
@@ -89,7 +89,12 @@ export class Kamijs {
 
         const isPity = MercyIA.shouldIntervene(user);
         const { sql, params } = MercyIA.getRollQuery(isPity, user.balance);
-        const char = await this.db.get(sql, params);
+        let char = await this.db.get(sql, params);
+
+        if (!char && isPity) {
+            const normalRoll = MercyIA.getRollQuery(false, 0);
+            char = await this.db.get(normalRoll.sql, normalRoll.params);
+        }
 
         if (!char) return { error: 'NOT_FOUND' };
 
@@ -151,5 +156,18 @@ export class Kamijs {
         const jid = await LidGuard.clean(sock, rawJid);
         TradeManager.cancel(tradeId, jid);
         return { success: true };
+    }
+
+    async voteCharacter(charId) {
+        const result = await this.db.run("UPDATE characters SET votes = votes + 1 WHERE id = ?", [charId]);
+        if (result.changes === 0) throw new Error('CHARACTER_NOT_FOUND');
+        return true;
+    }
+
+    async getTopCharacters(limit = 10) {
+        return await this.db.all(
+            "SELECT id, name, series, votes FROM characters WHERE votes > 0 ORDER BY votes DESC LIMIT ?", 
+            [limit]
+        );
     }
 }
