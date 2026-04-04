@@ -48,14 +48,15 @@ export class Kamijs {
         }
     }
 
-    // Agrega un solo personaje (útil para comandos de admin)
     async addCharacter(data) {
-        const { id, name, series, booru_tag, value = 3000 } = data;
-        if (!id || !name || !series || !booru_tag) throw new Error('MISSING_REQUIRED_FIELDS');
+        const { id, name, series, gender, booru_tag, value = 3000 } = data;
+        if (!id || !name || !series || !gender || !booru_tag) {
+            throw new Error('MISSING_REQUIRED_FIELDS');
+        }
 
         await this.db.run(
-            "INSERT OR IGNORE INTO characters (id, name, series, booru_tag, value) VALUES (?, ?, ?, ?, ?)",
-            [id, name, series, booru_tag, value]
+            "INSERT OR IGNORE INTO characters (id, name, series, gender, booru_tag, value) VALUES (?, ?, ?, ?, ?, ?)",
+            [id, name, series, gender, booru_tag, value]
         );
         
         const backup = await fs.readJson(this.jsonPath);
@@ -65,7 +66,6 @@ export class Kamijs {
         }
     }
 
-    // Carga masiva optimizada (para el seeder)
     async bulkAddCharacters(dataArray) {
         if (!Array.isArray(dataArray)) throw new Error('INVALID_ARRAY');
 
@@ -75,12 +75,11 @@ export class Kamijs {
 
         try {
             for (const char of dataArray) {
-                // Validación preventiva
-                if (!char.id || !char.name || !char.series || !char.booru_tag) continue;
+                if (!char.id || !char.name || !char.series || !char.gender || !char.booru_tag) continue;
 
                 const result = await this.db.run(
-                    "INSERT OR IGNORE INTO characters (id, name, series, booru_tag, value) VALUES (?, ?, ?, ?, ?)",
-                    [char.id, char.name, char.series, char.booru_tag, char.value || 3000]
+                    "INSERT OR IGNORE INTO characters (id, name, series, gender, booru_tag, value) VALUES (?, ?, ?, ?, ?, ?)",
+                    [char.id, char.name, char.series, char.gender, char.booru_tag, char.value || 3000]
                 );
 
                 if (result.changes > 0 && !backup.characters.find(c => c.id === char.id)) {
@@ -128,7 +127,6 @@ export class Kamijs {
         const { sql, params } = MercyIA.getRollQuery(isPity, user.balance);
         let char = await this.db.get(sql, params);
 
-        // Fallback: Si el pity falla (usuario pobre), dar un roll normal
         if (!char && isPity) {
             const normalRoll = MercyIA.getRollQuery(false, 0);
             char = await this.db.get(normalRoll.sql, normalRoll.params);
@@ -141,6 +139,8 @@ export class Kamijs {
         return {
             id: char.id,
             name: char.name,
+            series: char.series,
+            gender: char.gender,
             value: char.value,
             currencyName: this.currency,
             imageUrl: await ImageProvider.getRandomUrl(char.booru_tag),
@@ -204,7 +204,7 @@ export class Kamijs {
 
     async getTopCharacters(limit = 10) {
         return await this.db.all(
-            "SELECT id, name, series, votes FROM characters WHERE votes > 0 ORDER BY votes DESC LIMIT ?", 
+            "SELECT id, name, series, gender, votes FROM characters WHERE votes > 0 ORDER BY votes DESC LIMIT ?", 
             [limit]
         );
     }
