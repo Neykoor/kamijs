@@ -23,6 +23,7 @@
 | ⏱️ **Cooldowns en Memoria** | Sistema de verificación y confirmación en dos pasos, sin escrituras en disco |
 | 🧬 **LidGuard Integrado** | Normaliza automáticamente todos los JIDs para mantener la base de datos limpia |
 | 💱 **Moneda Personalizable** | Configura el nombre de la moneda del juego (`yenes`, `coins`, `rubíes`, etc.) |
+| 📦 **Carga Masiva** | `bulkAddCharacters()` carga miles de personajes en una sola transacción SQL |
 
 ---
 
@@ -74,7 +75,7 @@ if (result.error === 'NOT_FOUND') return reply(`❌ No hay personajes disponible
 try {
     await sock.sendMessage(m.chat, {
         image: { url: result.imageUrl },
-        caption: `🌟 *${result.name}*\n💰 ${result.value} ${result.currencyName}`
+        caption: `🌟 *${result.name}*\n📺 ${result.series}\n💰 ${result.value} ${result.currencyName}`
     });
 
     // CRÍTICO: Solo confirmar si el mensaje se envió con éxito
@@ -117,7 +118,7 @@ reply(`🔄 Trade *${trade.trade.id}* enviado. El destinatario tiene 5 minutos p
 await gacha.confirmTrade(sock, m.sender, tradeId);
 reply('✅ ¡Trade completado!');
 
-// Cancelar (cualquiera de los dos)
+// Cancelar (cualquiera de los dos) — método síncrono
 gacha.cancelTrade(sock, m.sender, tradeId);
 reply('❌ Trade cancelado.');
 ```
@@ -137,13 +138,25 @@ reply(
 
 ```js
 await gacha.addCharacter({
-    id: 'char_001',
+    id: 'marin-kitagawa',
     name: 'Marin Kitagawa',
     series: 'Sono Bisque Doll',
     gender: 'female',
     booru_tag: 'kitagawa_marin',
-    value: 3500
+    value: 8000
 });
+```
+
+### 7. Carga masiva (Seeder)
+
+```js
+const characters = [
+    { id: 'marin-kitagawa', name: 'Marin Kitagawa', series: 'Sono Bisque Doll', gender: 'female', booru_tag: 'kitagawa_marin', value: 8000 },
+    { id: 'wakana-gojo',    name: 'Wakana Gojo',    series: 'Sono Bisque Doll', gender: 'male',   booru_tag: 'gojou_wakana',   value: 3000 },
+];
+
+const added = await gacha.bulkAddCharacters(characters);
+console.log(`${added} personajes nuevos cargados.`);
 ```
 
 ---
@@ -161,9 +174,11 @@ Ejecuta un roll del gacha para el usuario.
 **Retorna:**
 ```js
 {
-    id: 'char_001',
+    id: 'marin-kitagawa',
     name: 'Marin Kitagawa',
-    value: 3500,
+    series: 'Sono Bisque Doll',
+    gender: 'female',
+    value: 8000,
     currencyName: 'yenes',
     imageUrl: 'https://...',
     pityActive: false,
@@ -210,7 +225,7 @@ Obtiene el perfil completo del usuario.
     balance: 12500,
     currencyName: 'yenes',
     characters: [
-        { id: 'char_001', name: 'Marin Kitagawa', series: 'Sono Bisque Doll', value: 3500 },
+        { id: 'marin-kitagawa', name: 'Marin Kitagawa', series: 'Sono Bisque Doll', value: 8000 },
         ...
     ]
 }
@@ -243,12 +258,12 @@ El destinatario confirma el trade. Ejecuta el intercambio en una transacción at
 ---
 
 ### `gacha.cancelTrade(sock, jid, tradeId)`
-Cancela un trade activo. Puede ser llamado por cualquiera de los dos participantes.
+Método **síncrono**. Cancela un trade activo. Puede ser llamado por cualquiera de los dos participantes.
 
 ---
 
 ### `await gacha.addCharacter(data)`
-Añade un personaje a SQLite y lo respalda en `characters.json`.
+Añade un personaje a SQLite y lo respalda en `characters.json`. Si el personaje ya existe, lo ignora silenciosamente.
 
 | Campo | Tipo | Requerido | Default |
 |---|---|---|---|
@@ -259,12 +274,41 @@ Añade un personaje a SQLite y lo respalda en `characters.json`.
 | `booru_tag` | string | ✅ | — |
 | `value` | number | ❌ | `3000` |
 
-> ⚠️ Este método reescribe el JSON completo en cada llamada. Para importaciones masivas, usa `bulkImport()`.
+> ⚠️ Este método reescribe el JSON completo en cada llamada. Para importaciones masivas usa `bulkAddCharacters()`.
 
 ---
 
-### `await gacha.bulkImport(characters[])` *(próximamente)*
-Método optimizado para cargar miles de personajes en una sola transacción SQL, sin reescribir el JSON en cada inserción.
+### `await gacha.bulkAddCharacters(dataArray)`
+Carga un array de personajes en una sola transacción SQL y escribe el JSON una sola vez al finalizar. Personajes con campos faltantes se omiten con un warning, sin abortar el proceso.
+
+**Retorna:** `number` — cantidad de personajes nuevos insertados.
+
+```js
+const added = await gacha.bulkAddCharacters(characters);
+// → 47 (personajes nuevos, los duplicados se ignoran)
+```
+
+---
+
+### `await gacha.voteCharacter(charId)`
+Incrementa en 1 el contador de votos de un personaje.
+
+**Throws:** `CHARACTER_NOT_FOUND`
+
+---
+
+### `await gacha.getTopCharacters(limit?)`
+Retorna los personajes con más votos ordenados descendentemente.
+
+**Parámetros:** `limit` (default: `10`)
+
+**Retorna:**
+```js
+[
+    { id: 'marin-kitagawa', name: 'Marin Kitagawa', series: 'Sono Bisque Doll', gender: 'female', votes: 142 },
+    ...
+]
+```
 
 ---
 
@@ -288,7 +332,7 @@ Método optimizado para cargar miles de personajes en una sola transacción SQL,
 | `jid` | TEXT PK | JID normalizado |
 | `balance` | INTEGER | Saldo actual (default: 0) |
 | `stress_level` | INTEGER | Nivel de estrés 0–5 |
-| `last_interaction` | INTEGER | Timestamp del último roll |
+| `last_interaction` | INTEGER | Timestamp de la última acción |
 
 ### `trade_history`
 | Campo | Tipo | Descripción |
@@ -309,7 +353,8 @@ El Mercy System de kamijs no es un pity de rareza clásico. Es un **pity de disp
 1. Cada vez que un usuario pierde un claim, su `stress_level` sube (`reportMissedClaim`).
 2. Con estrés ≥ 3, la IA tiene un **40% de probabilidad** de intervenir en el próximo roll.
 3. Cuando interviene, el roll filtra solo personajes **libres** con `value ≤ saldo del usuario`.
-4. El estrés **decae naturalmente**: cada 2 horas de inactividad baja 1 punto.
+4. Si el pity no encuentra personajes asequibles, hace fallback a un roll normal.
+5. El estrés **decae naturalmente**: cada 2 horas de inactividad baja 1 punto.
 
 ---
 
@@ -331,8 +376,6 @@ async function start() {
         currency: 'yenes'
     });
     await gacha.init();
-
-    // gacha disponible en todos tus plugins via ctx o global
 }
 ```
 
@@ -343,7 +386,7 @@ async function start() {
 - **Socket requerido:** Todos los métodos con `jid` requieren `sock` para resolver LIDs vía LidSync.
 - **Trades en memoria:** Los trades pendientes se pierden si el proceso se reinicia.
 - **Imágenes dinámicas:** El mismo personaje puede mostrar imagen diferente en cada roll. Es intencional.
-- **Importaciones masivas:** `addCharacter` no está optimizado para bulk. Espera `bulkImport()`.
+- **`addCharacter` vs `bulkAddCharacters`:** Para un personaje usa `addCharacter`. Para carga masiva usa `bulkAddCharacters`.
 
 ---
 
