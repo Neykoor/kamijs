@@ -4,24 +4,32 @@ export class EconomyManager {
         
         try {
             const char = await db.get("SELECT value, owner_id FROM characters WHERE id = ?", [charId]);
-            if (!char || char.owner_id !== null) {
-                throw new Error('ALREADY_CLAIMED');
-            }
+            
+            if (!char) throw new Error('CHARACTER_NOT_FOUND');
+            if (char.owner_id !== null) throw new Error('ALREADY_CLAIMED');
 
-            const user = await db.get("SELECT yenes FROM users WHERE jid = ?", [jid]);
-            if (!user || user.yenes < char.value) {
+            const userUpdate = await db.run(`
+                UPDATE users 
+                SET yenes = yenes - ?, stress_level = 0, last_interaction = ? 
+                WHERE jid = ? AND yenes >= ?
+            `, [char.value, Date.now(), jid, char.value]);
+
+            if (userUpdate.changes === 0) {
                 throw new Error('INSUFFICIENT_FUNDS');
             }
 
-            await db.run("UPDATE users SET yenes = yenes - ?, stress_level = 0, last_interaction = ? WHERE jid = ?", 
-                [char.value, Date.now(), jid]);
             await db.run("UPDATE characters SET owner_id = ? WHERE id = ?", [jid, charId]);
             
             await db.run("COMMIT");
-            return true;
+            
+            return {
+                success: true,
+                characterValue: char.value,
+                characterId: charId
+            };
             
         } catch (e) {
-            await db.run("ROLLBACK");
+            await db.run("ROLLBACK").catch(() => {});
             throw e;
         }
     }
