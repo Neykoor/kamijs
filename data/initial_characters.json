@@ -1,0 +1,39 @@
+{
+  "characters": [
+    {
+      "id": "marin-kitagawa",
+      "name": "Marin Kitagawa",
+      "series": "Sono Bisque Doll wa Koi wo Suru",
+      "booru_tag": "kitagawa_marin",
+      "value": 8000
+    },
+    {
+      "id": "wakana-gojo",
+      "name": "Wakana Gojo",
+      "series": "Sono Bisque Doll wa Koi wo Suru",
+      "booru_tag": "gojou_wakana",
+      "value": 3000
+    },
+    {
+      "id": "sajuna-inui",
+      "name": "Sajuna Inui (Juju)",
+      "series": "Sono Bisque Doll wa Koi wo Suru",
+      "booru_tag": "inui_sajuna",
+      "value": 5500
+    },
+    {
+      "id": "shinju-inui",
+      "name": "Shinju Inui",
+      "series": "Sono Bisque Doll wa Koi wo Suru",
+      "booru_tag": "inui_shinju",
+      "value": 4000
+    },
+    {
+      "id": "shizuku-tan",
+      "name": "Shizuku-tan (Marin Cosplay)",
+      "series": "Sono Bisque Doll wa Koi wo Suru",
+      "booru_tag": "kuroe_shizuku",
+      "value": 9000
+    }
+  ]
+}
