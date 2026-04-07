@@ -3,10 +3,10 @@ export class Cooldowns {
         this.pending = new Map();
     }
 
-    isReady(jid, type = 'roll', seconds = 60) {
-        const key = `${jid}_${type}`;
+    isReady(key, seconds = 60) {
         const now = Date.now();
-        const last = this.pending.get(key) || 0;
+        const record = this.pending.get(key);
+        const last = record ? record.ts : 0;
         const diff = (now - last) / 1000;
 
         if (diff < seconds) {
@@ -16,8 +16,8 @@ export class Cooldowns {
         return { ready: true };
     }
 
-    confirm(jid, type = 'roll') {
-        this.pending.set(`${jid}_${type}`, Date.now());
+    confirm(key, seconds = 86400) {
+        this.pending.set(key, { ts: Date.now(), ttl: seconds * 1000 });
 
         if (Math.random() < 0.05) {
             this.#cleanup();
@@ -26,9 +26,8 @@ export class Cooldowns {
 
     #cleanup() {
         const now = Date.now();
-        const maxAge = 24 * 60 * 60 * 1000; 
-        for (const [key, timestamp] of this.pending) {
-            if (now - timestamp > maxAge) {
+        for (const [key, { ts, ttl }] of this.pending) {
+            if (now - ts > ttl) {
                 this.pending.delete(key);
             }
         }
