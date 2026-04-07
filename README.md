@@ -1,6 +1,6 @@
 # ✨ kamijs
 
-> Motor de Gacha con economía, trades, IA de Compasión y seguridad transaccional para bots de WhatsApp.
+> Motor de Gacha con economía, mercado, trades, IA de Compasión y seguridad transaccional para bots de WhatsApp.
 
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green?style=flat-square&logo=node.js)](https://nodejs.org)
 [![SQLite](https://img.shields.io/badge/SQLite-WAL-blue?style=flat-square&logo=sqlite)](https://sqlite.org)
@@ -17,12 +17,14 @@
 | Característica | Descripción |
 |---|---|
 | 🧠 **IA de Compasión** | Evalúa el estrés del usuario y su saldo para inclinar sutilmente la balanza en rolls futuros |
-| 🛡️ **Transacciones Atómicas** | `BEGIN IMMEDIATE` + modo WAL en SQLite elimina race conditions en claims simultáneos |
-| 🔄 **Sistema de Trades** | Intercambio de personajes entre usuarios con expiración automática (5 min) y verificación en transacción |
-| 🖼️ **Imágenes Dinámicas** | Genera URLs aleatorias en tiempo real desde Yande.re usando tags de booru |
+| 🛡️ **Transacciones Atómicas** | `BEGIN IMMEDIATE` + modo WAL elimina race conditions en claims y compras simultáneas |
+| 🔄 **Sistema de Trades** | Intercambio de personajes con expiración automática (5 min) y verificación de propiedad en transacción |
+| 🏪 **Mercado Abierto** | Listado, compra y retiro de personajes con detección de ambigüedad por nombre |
+| 🖼️ **Imágenes Dinámicas** | URLs aleatorias en tiempo real desde Yande.re usando tags de booru |
 | ⏱️ **Cooldowns en Memoria** | Sistema de verificación y confirmación en dos pasos, sin escrituras en disco |
-| 🧬 **LidGuard Integrado** | Normaliza automáticamente todos los JIDs para mantener la base de datos limpia |
-| 💱 **Moneda Personalizable** | Configura el nombre de la moneda del juego (`yenes`, `coins`, `rubíes`, etc.) |
+| 🧬 **LidGuard Integrado** | Normaliza automáticamente todos los JIDs incluyendo sufijos de dispositivo (`:0`, `:1`) |
+| 💱 **Moneda Personalizable** | Configura el nombre de la moneda (`yenes`, `coins`, `rubíes`, etc.) |
+| 💬 **Mensaje de Claim Personalizado** | Cada usuario puede definir su propio texto de captura con variables dinámicas |
 | 📦 **Carga Masiva** | `bulkAddCharacters()` carga miles de personajes en una sola transacción SQL |
 
 ---
@@ -44,7 +46,7 @@ O agrega manualmente a tu `package.json`:
 }
 ```
 
-> **Requisito:** El socket de Baileys debe tener [LidSync](https://github.com/Neykoor/LidSync) aplicado antes de pasarlo a kamijs. Ver [sección de integración](#-integración-con-lidsync).
+> **Requisito:** El socket de Baileys debe tener [LidSync](https://github.com/Neykoor/LidSync) aplicado antes de pasarlo a kamijs.
 
 ---
 
@@ -58,7 +60,7 @@ import { Kamijs } from 'kamijs';
 const gacha = new Kamijs({
     dbPath: './database/gacha.db',
     jsonPath: './database/characters.json',
-    currency: 'yenes'          // Nombre de la moneda (opcional, default: 'yenes')
+    currency: 'yenes'
 });
 
 await gacha.init();
@@ -77,10 +79,7 @@ try {
         image: { url: result.imageUrl },
         caption: `🌟 *${result.name}*\n📺 ${result.series}\n💰 ${result.value} ${result.currencyName}`
     });
-
-    // CRÍTICO: Solo confirmar si el mensaje se envió con éxito
-    gacha.confirmRoll(result.resolvedJid);
-
+    gacha.confirmRoll(result.resolvedJid); // Solo confirmar si el envío fue exitoso
 } catch (err) {
     console.error('[kamijs] Error de red, cooldown no aplicado.');
 }
@@ -90,51 +89,50 @@ try {
 
 ```js
 try {
-    await gacha.claim(sock, m.sender, charId);
-    reply('🎉 ¡Personaje reclamado con éxito!');
-
+    const result = await gacha.claim(sock, m.sender, charName);
+    reply(result.customMsg || '🎉 ¡Personaje reclamado!');
 } catch (err) {
     if (err.message === 'ALREADY_CLAIMED') {
         await gacha.reportMissedClaim(sock, m.sender);
-        reply('❌ Alguien fue más rápido que tú.');
+        reply('❌ Alguien fue más rápido.');
     } else if (err.message === 'INSUFFICIENT_FUNDS') {
         reply('💸 No tienes suficiente saldo.');
-    } else if (err.message === 'CHARACTER_NOT_FOUND') {
-        reply('❓ Personaje no encontrado.');
     }
 }
 ```
 
-### 4. Trade (`#trade`)
+### 4. Mercado (`#market`, `#sell`, `#buy`)
 
 ```js
-// Proponer un intercambio
-const trade = await gacha.proposeTrade(sock, m.sender, targetJid, offeredCharId, requestedCharId);
-if (trade.error === 'COOLDOWN') return reply(`⏳ Espera ${trade.remaining}s.`);
+// Ver el mercado (paginado)
+const market = await gacha.getMarketplace(page, 10);
+reply(market.items.map(c => `[${c.id}] ${c.name} — ${c.market_price}¥`).join('\n'));
 
-reply(`🔄 Trade *${trade.trade.id}* enviado. El destinatario tiene 5 minutos para confirmar.`);
+// Poner en venta
+await gacha.listCharacter(sock, m.sender, 'Marin Kitagawa', 5000);
 
-// Confirmar (el destinatario)
+// Comprar
+try {
+    const result = await gacha.buyCharacter(sock, m.sender, 'Marin Kitagawa');
+    reply(`✅ Compraste a ${result.charName} por ${result.price}¥`);
+} catch (err) {
+    if (err.message.startsWith('AMBIGUOUS_BUY')) {
+        reply(`Hay varias en venta, elige por ID:\n${err.message.replace('AMBIGUOUS_BUY:\n', '')}`);
+    }
+}
+```
+
+### 5. Trade (`#trade`)
+
+```js
+const trade = await gacha.proposeTrade(sock, m.sender, targetJid, 'Marin', 'Sakura');
+reply(`🔄 Trade *${trade.trade.id}* enviado. 5 minutos para confirmar.`);
+
 await gacha.confirmTrade(sock, m.sender, tradeId);
-reply('✅ ¡Trade completado!');
-
-// Cancelar (cualquiera de los dos) — método síncrono
 gacha.cancelTrade(sock, m.sender, tradeId);
-reply('❌ Trade cancelado.');
 ```
 
-### 5. Perfil de usuario (`#perfil`)
-
-```js
-const profile = await gacha.getUserProfile(sock, m.sender);
-reply(
-    `💼 *Perfil*\n` +
-    `💰 Saldo: ${profile.balance} ${profile.currencyName}\n` +
-    `🎴 Personajes: ${profile.characters.length}`
-);
-```
-
-### 6. Agregar Personaje (`#addchar`)
+### 6. Agregar personaje (`#addchar`)
 
 ```js
 await gacha.addCharacter({
@@ -147,168 +145,223 @@ await gacha.addCharacter({
 });
 ```
 
-### 7. Carga masiva (Seeder)
-
-```js
-const characters = [
-    { id: 'marin-kitagawa', name: 'Marin Kitagawa', series: 'Sono Bisque Doll', gender: 'female', booru_tag: 'kitagawa_marin', value: 8000 },
-    { id: 'wakana-gojo',    name: 'Wakana Gojo',    series: 'Sono Bisque Doll', gender: 'male',   booru_tag: 'gojou_wakana',   value: 3000 },
-];
-
-const added = await gacha.bulkAddCharacters(characters);
-console.log(`${added} personajes nuevos cargados.`);
-```
-
 ---
 
 ## 📚 Referencia de API
 
-### `await gacha.init()`
-Crea las tablas en SQLite, activa el modo WAL y genera `characters.json` si no existe. Debe llamarse una vez al arrancar el bot.
+### 🎲 Núcleo del juego
 
----
-
-### `await gacha.roll(sock, jid)`
-Ejecuta un roll del gacha para el usuario.
+#### `await gacha.roll(sock, jid)`
+Ejecuta un roll para el usuario. Activa el análisis de la IA de Compasión automáticamente.
 
 **Retorna:**
 ```js
 {
-    id: 'marin-kitagawa',
-    name: 'Marin Kitagawa',
-    series: 'Sono Bisque Doll',
-    gender: 'female',
-    value: 8000,
+    id, name, series, gender, value,
     currencyName: 'yenes',
     imageUrl: 'https://...',
     pityActive: false,
     resolvedJid: '521234567890@s.whatsapp.net'
 }
 ```
+**Errores:** `{ error: 'COOLDOWN', remaining: 42 }` · `{ error: 'NOT_FOUND' }`
 
-**Errores:**
+---
+
+#### `gacha.confirmRoll(resolvedJid)`
+**Síncrono.** Aplica el cooldown. Llamar **solo** después de enviar el mensaje exitosamente.
+
+---
+
+#### `await gacha.claim(sock, jid, query)`
+Compra un personaje. Acepta nombre o ID como `query`.
+
+**Retorna:** `{ success: true, characterValue, characterId, customMsg }`
+
+**Throws:** `CHARACTER_NOT_FOUND_OR_CLAIMED` · `ALREADY_CLAIMED` · `INSUFFICIENT_FUNDS` · `AMBIGUOUS_QUERY:\n[lista de IDs]`
+
+---
+
+#### `await gacha.reportMissedClaim(sock, jid)`
+Sube el `stress_level` en 1 (máx 5) cuando el usuario pierde un claim.
+
+---
+
+### 💰 Economía
+
+#### `await gacha.addBalance(sock, jid, amount)`
+Añade saldo al usuario. Crea el usuario si no existe.
+
+---
+
+#### `await gacha.setClaimMsg(sock, jid, message)`
+Define el mensaje personalizado que aparece cuando el usuario reclama un personaje.
+
+- **Límite sugerido:** 150-200 caracteres
+- **Variables disponibles:** `{{user}}` (número del reclamante), `{{char}}` (nombre del personaje)
+- Si no se define, el bot usa el mensaje predeterminado
+
 ```js
-{ error: 'COOLDOWN', remaining: 42 }
-{ error: 'NOT_FOUND' }
+await gacha.setClaimMsg(sock, m.sender, '¡{{char}} es mía ahora, @{{user}}! 💖');
 ```
 
 ---
 
-### `gacha.confirmRoll(resolvedJid)`
-Método **síncrono**. Aplica el cooldown al usuario. Debe llamarse **únicamente** después de que el mensaje se haya enviado exitosamente a WhatsApp.
+### 🏪 Mercado
+
+#### `await gacha.getMarketplace(page?, limit?)`
+Lista los personajes en venta ordenados por precio ascendente.
+
+**Retorna:** `{ items, totalPages, currentPage, totalItems }`
 
 ---
 
-### `await gacha.claim(sock, jid, charId)`
-Intenta comprar un personaje. Usa `BEGIN IMMEDIATE` para garantizar atomicidad ante claims simultáneos.
+#### `await gacha.listCharacter(sock, jid, query, price)`
+Pone un personaje en venta. Valida propiedad con doble capa de seguridad.
 
-**Retorna:** `{ success: true, characterValue, characterId }`
-
-**Throws:**
-- `CHARACTER_NOT_FOUND` — el personaje no existe
-- `ALREADY_CLAIMED` — el personaje ya tiene dueño
-- `INSUFFICIENT_FUNDS` — saldo insuficiente
+**Throws:** `INVALID_PRICE` · `CHARACTER_NOT_FOUND` · `NOT_OWNER_OR_NOT_FOUND`
 
 ---
 
-### `await gacha.reportMissedClaim(sock, jid)`
-Incrementa el `stress_level` del usuario en 1 (máximo 5). Llámalo cuando el usuario pierde un claim ante otro jugador para activar la IA de Compasión.
+#### `await gacha.buyCharacter(sock, jid, query)`
+Compra un personaje del mercado. Si hay varios con el mismo nombre, lanza `AMBIGUOUS_BUY` con la lista de IDs para elegir.
+
+**Throws:** `NOT_FOR_SALE` · `AMBIGUOUS_BUY:\n[lista]` · `ALREADY_SOLD_OR_WITHDRAWN` · `ALREADY_OWNED_BY_YOU` · `INSUFFICIENT_FUNDS`
 
 ---
 
-### `await gacha.getUserProfile(sock, jid)`
-Obtiene el perfil completo del usuario.
+### 🎒 Gestión del Harem
+
+#### `await gacha.withdrawCharacter(sock, jid, query)`
+Retira un personaje del mercado sin liberarlo. Útil para cambiar el precio.
+
+> 🛡️ Doble capa de seguridad: valida propiedad en `#resolveCharacter` y en el `UPDATE AND owner_id = ?`.
+
+---
+
+#### `await gacha.deleteClaim(sock, jid, query)`
+Libera un personaje de vuelta al pool (disponible para rolls futuros).
+
+> 🛡️ Doble capa de seguridad: igual que `withdrawCharacter`.
+
+---
+
+#### `await gacha.giveCharacter(sock, fromJid, toJid, query)`
+Regala un personaje específico a otro usuario.
+
+**Throws:** `CANNOT_GIVE_TO_SELF` · `CHARACTER_NOT_FOUND` · `TRANSFER_FAILED`
+
+---
+
+#### `await gacha.giveAllHarem(sock, fromJid, toJid)`
+Transfiere toda la colección en una sola transacción atómica.
+
+**Throws:** `CANNOT_GIVE_TO_SELF` · `EMPTY_HAREM`
+
+---
+
+### 🔄 Trades
+
+#### `await gacha.proposeTrade(sock, fromJid, toJid, offeredQuery, requestedQuery)`
+Propone un intercambio. Expira en **5 minutos**. Los trades activos se almacenan en memoria.
+
+**Retorna:** `{ success: true, trade: { id, ... }, offeredRealName, requestedRealName }`
+
+**Throws:** `SELF_TRADE` · `OFFERED_CHAR_NOT_OWNED` · `REQUESTED_CHAR_NOT_OWNED`
+
+> ⚠️ Si el bot se reinicia, los trades pendientes se pierden.
+
+---
+
+#### `await gacha.confirmTrade(sock, targetJid, tradeId)`
+Confirma el trade. Verifica propiedad en transacción al momento de ejecutar.
+
+**Throws:** `TRADE_NOT_FOUND_OR_EXPIRED` · `UNAUTHORIZED_CONFIRMATION` · `OWNERSHIP_CHANGED_DURING_TRADE`
+
+---
+
+#### `gacha.cancelTrade(sock, jid, tradeId)`
+**Síncrono.** Cancela un trade activo. Puede ser llamado por cualquiera de los dos participantes.
+
+---
+
+### 📊 Información y Rankings
+
+#### `await gacha.getCharacterInfo(query)`
+Ficha completa del personaje con imagen dinámica y tag del dueño si tiene.
+
+**Retorna:** `{ id, name, series, gender, value, votes, owner_id, ownerTag, imageUrl, ... }`
+
+---
+
+#### `await gacha.getUserProfile(sock, jid)`
+Perfil del usuario con colección, saldo y cooldowns activos.
 
 **Retorna:**
 ```js
 {
     balance: 12500,
     currencyName: 'yenes',
-    characters: [
-        { id: 'marin-kitagawa', name: 'Marin Kitagawa', series: 'Sono Bisque Doll', value: 8000 },
-        ...
-    ]
+    characters: [{ id, name, series, value }, ...],
+    cooldowns: { roll: 0, vote: 42 }  // segundos restantes, 0 = disponible
 }
 ```
 
 ---
 
-### `await gacha.proposeTrade(sock, proposerJid, targetJid, offeredCharId, requestedCharId)`
-Crea una propuesta de intercambio entre dos usuarios. El trade expira automáticamente en **5 minutos**.
-
-**Retorna:** `{ success: true, trade: { id, proposerJid, targetJid, offeredCharId, requestedCharId, expiresAt } }`
-
-**Throws:**
-- `SELF_TRADE` — el usuario intenta hacer trade consigo mismo
-- `OFFERED_CHAR_NOT_OWNED` — el personaje ofrecido no pertenece al proponente
-- `REQUESTED_CHAR_NOT_OWNED` — el personaje solicitado no pertenece al destinatario
-
-> ⚠️ Los trades activos se almacenan en memoria. Si el bot se reinicia, los trades pendientes se pierden.
+#### `await gacha.getSeriesInfo(seriesName)`
+Estadísticas de una serie: total de personajes y cuántos están reclamados.
 
 ---
 
-### `await gacha.confirmTrade(sock, targetJid, tradeId)`
-El destinatario confirma el trade. Ejecuta el intercambio en una transacción atómica con verificación de propiedad al momento de confirmar.
-
-**Throws:**
-- `TRADE_NOT_FOUND_OR_EXPIRED`
-- `UNAUTHORIZED_CONFIRMATION`
-- `OWNERSHIP_CHANGED_DURING_TRADE` — algún personaje cambió de dueño mientras el trade estaba pendiente
+#### `await gacha.listSeries(page?, limit?)`
+Lista paginada de todas las series disponibles en la DB.
 
 ---
 
-### `gacha.cancelTrade(sock, jid, tradeId)`
-Método **síncrono**. Cancela un trade activo. Puede ser llamado por cualquiera de los dos participantes.
+#### `await gacha.getTopWaifus(limit?)`
+Top de personajes ordenados por votos descendentes.
 
 ---
 
-### `await gacha.addCharacter(data)`
-Añade un personaje a SQLite y lo respalda en `characters.json`. Si el personaje ya existe, lo ignora silenciosamente.
+#### `await gacha.voteCharacter(sock, jid, query)`
+Vota por un personaje. Cooldown de **1 hora** por usuario.
+
+**Retorna:** `{ name, newVotes }`
+
+---
+
+#### `await gacha.getCharacterImage(query?)`
+Obtiene una imagen dinámica. Sin `query`, elige un personaje aleatorio de la DB.
+
+---
+
+#### `await gacha.getRandomAvailable()`
+Retorna un personaje libre al azar (sin dueño).
+
+---
+
+### 🛠️ Admin
+
+#### `await gacha.addCharacter(data)`
 
 | Campo | Tipo | Requerido | Default |
 |---|---|---|---|
-| `id` | string | ✅ | — |
+| `id` | string | ❌ | auto-generado |
 | `name` | string | ✅ | — |
 | `series` | string | ✅ | — |
 | `gender` | string | ✅ | — |
 | `booru_tag` | string | ✅ | — |
 | `value` | number | ❌ | `3000` |
 
-> ⚠️ Este método reescribe el JSON completo en cada llamada. Para importaciones masivas usa `bulkAddCharacters()`.
+> ⚠️ Reescribe el JSON completo en cada llamada. Para carga masiva usa `bulkAddCharacters()`.
 
 ---
 
-### `await gacha.bulkAddCharacters(dataArray)`
-Carga un array de personajes en una sola transacción SQL y escribe el JSON una sola vez al finalizar. Personajes con campos faltantes se omiten con un warning, sin abortar el proceso.
+#### `await gacha.bulkAddCharacters(dataArray)`
+Carga masiva en una sola transacción. Personajes con campos faltantes se omiten con warning.
 
 **Retorna:** `number` — cantidad de personajes nuevos insertados.
-
-```js
-const added = await gacha.bulkAddCharacters(characters);
-// → 47 (personajes nuevos, los duplicados se ignoran)
-```
-
----
-
-### `await gacha.voteCharacter(charId)`
-Incrementa en 1 el contador de votos de un personaje.
-
-**Throws:** `CHARACTER_NOT_FOUND`
-
----
-
-### `await gacha.getTopCharacters(limit?)`
-Retorna los personajes con más votos ordenados descendentemente.
-
-**Parámetros:** `limit` (default: `10`)
-
-**Retorna:**
-```js
-[
-    { id: 'marin-kitagawa', name: 'Marin Kitagawa', series: 'Sono Bisque Doll', gender: 'female', votes: 142 },
-    ...
-]
-```
 
 ---
 
@@ -317,22 +370,24 @@ Retorna los personajes con más votos ordenados descendentemente.
 ### `characters`
 | Campo | Tipo | Descripción |
 |---|---|---|
-| `id` | TEXT PK | Identificador único |
+| `id` | TEXT PK | Identificador único (auto-generado si no se provee) |
 | `name` | TEXT | Nombre del personaje |
 | `series` | TEXT | Serie o franquicia |
 | `gender` | TEXT | Género |
 | `booru_tag` | TEXT | Tag para búsqueda en Yande.re |
-| `value` | INTEGER | Precio (default: 3000) |
+| `value` | INTEGER | Precio base (default: 3000) |
 | `owner_id` | TEXT | JID del dueño (`NULL` si libre) |
 | `votes` | INTEGER | Votos de popularidad |
+| `market_price` | INTEGER | Precio en el mercado (`NULL` si no está en venta) |
 
 ### `users`
 | Campo | Tipo | Descripción |
 |---|---|---|
 | `jid` | TEXT PK | JID normalizado |
-| `balance` | INTEGER | Saldo actual (default: 0) |
-| `stress_level` | INTEGER | Nivel de estrés 0–5 |
-| `last_interaction` | INTEGER | Timestamp de la última acción |
+| `balance` | INTEGER | Saldo actual |
+| `stress_level` | INTEGER | Nivel de estrés 0–5 (IA de Compasión) |
+| `last_interaction` | INTEGER | Timestamp del último roll |
+| `claim_msg` | TEXT | Mensaje personalizado de captura |
 
 ### `trade_history`
 | Campo | Tipo | Descripción |
@@ -348,12 +403,12 @@ Retorna los personajes con más votos ordenados descendentemente.
 
 ## 🧠 IA de Compasión
 
-El Mercy System de kamijs no es un pity de rareza clásico. Es un **pity de disponibilidad y billetera**.
+El Mercy System de kamijs es un **pity de disponibilidad y billetera**, no de rareza.
 
-1. Cada vez que un usuario pierde un claim, su `stress_level` sube (`reportMissedClaim`).
-2. Con estrés ≥ 3, la IA tiene un **40% de probabilidad** de intervenir en el próximo roll.
-3. Cuando interviene, el roll filtra solo personajes **libres** con `value ≤ saldo del usuario`.
-4. Si el pity no encuentra personajes asequibles, hace fallback a un roll normal.
+1. Cada claim perdido sube `stress_level` en 1 via `reportMissedClaim`.
+2. Con estrés ≥ 3, la IA tiene **40% de probabilidad** de intervenir en el próximo roll.
+3. Cuando interviene, filtra solo personajes **libres** con `value ≤ saldo del usuario`.
+4. Si no encuentra personajes asequibles, hace fallback a roll normal.
 5. El estrés **decae naturalmente**: cada 2 horas de inactividad baja 1 punto.
 
 ---
@@ -371,10 +426,7 @@ async function start() {
     store.bind(sock.ev);
     sock = pluginLid(sock, { store });
 
-    const gacha = new Kamijs({
-        dbPath: './database/gacha.db',
-        currency: 'yenes'
-    });
+    const gacha = new Kamijs({ dbPath: './database/gacha.db', currency: 'yenes' });
     await gacha.init();
 }
 ```
@@ -385,7 +437,8 @@ async function start() {
 
 - **Socket requerido:** Todos los métodos con `jid` requieren `sock` para resolver LIDs vía LidSync.
 - **Trades en memoria:** Los trades pendientes se pierden si el proceso se reinicia.
-- **Imágenes dinámicas:** El mismo personaje puede mostrar imagen diferente en cada roll. Es intencional.
+- **Imágenes dinámicas:** El mismo personaje puede mostrar imagen diferente en cada aparición. Es intencional.
+- **Seguridad de operaciones:** `withdrawCharacter`, `deleteClaim`, `listCharacter` y `giveCharacter` tienen doble capa de validación de propiedad — en `#resolveCharacter` y en el `UPDATE AND owner_id = ?`.
 - **`addCharacter` vs `bulkAddCharacters`:** Para un personaje usa `addCharacter`. Para carga masiva usa `bulkAddCharacters`.
 
 ---
