@@ -1,12 +1,10 @@
-import fetch from 'node-fetch';
-
 export class ImageProvider {
     static async getRandomUrl(tag) {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 5000);
 
         try {
-            const query = encodeURIComponent(`${tag} (rating:s OR rating:q) order:random`);
+            const query = encodeURIComponent(`${tag} -rating:e order:random`);
             const url = `https://yande.re/post.json?tags=${query}&limit=1`;
             
             const response = await fetch(url, {
