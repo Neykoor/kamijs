@@ -253,6 +253,22 @@ export class Kamijs {
         return { success: true, charName: char.name };
     }
 
+    async giveAllHarem(sock, rawProposerJid, rawTargetJid) {
+        const proposerJid = await LidGuard.clean(sock, rawProposerJid);
+        const targetJid = await LidGuard.clean(sock, rawTargetJid);
+        if (proposerJid === targetJid) throw new Error('CANNOT_GIVE_TO_SELF');
+        await this.db.run("BEGIN IMMEDIATE");
+        try {
+            const result = await this.db.run("UPDATE characters SET owner_id = ?, market_price = NULL WHERE owner_id = ?", [targetJid, proposerJid]);
+            if (result.changes === 0) throw new Error('EMPTY_HAREM');
+            await this.db.run("COMMIT");
+            return { success: true, totalTransferred: result.changes };
+        } catch (e) {
+            await this.db.run("ROLLBACK").catch(() => {});
+            throw e;
+        }
+    }
+
     async getCharacterImage(query = null) {
         let finalName, finalTag;
         if (!query) {
@@ -317,4 +333,5 @@ export class Kamijs {
     async getTopCharacters(limit = 10) {
         return await this.db.all("SELECT id, name, series, gender, votes FROM characters WHERE votes > 0 ORDER BY votes DESC LIMIT ?", [limit]);
     }
-}
+                    }
+                       
