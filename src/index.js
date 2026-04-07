@@ -213,7 +213,7 @@ export class Kamijs {
             char = await this.db.get(pityQuery, [groupId]);
             if (!char) char = await this.db.get(normalQuery);
         } else {
-            const { sql, params } = MercyIA.getRollQuery(false, user.balance);
+            const { sql, params } = MercyIA.getRollQuery(user.balance);
             char = await this.db.get(sql, params);
             if (!char) char = await this.db.get(normalQuery);
         }
@@ -373,12 +373,16 @@ export class Kamijs {
         const tradeId = crypto.randomBytes(4).toString('hex');
         const expiresAt = Date.now() + 300000;
         
-        await this.db.run(
+        const result = await this.db.run(
             "INSERT INTO trade_history (id, group_id, proposer_jid, target_jid, offered_char, requested_char, timestamp, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [tradeId, groupId, from, to, offered.id, requested.id, Date.now(), expiresAt]
         );
-        this.cooldowns.confirm(`${from}_trade`);
-        return { success: true, tradeId, offeredRealName: offered.name, requestedRealName: requested.name };
+
+        if (result.changes > 0) {
+            this.cooldowns.confirm(`${from}_trade`);
+            return { success: true, tradeId, offeredRealName: offered.name, requestedRealName: requested.name };
+        }
+        throw new Error('TRADE_CREATION_FAILED');
     }
 
     async confirmTrade(sock, rawTo, tradeId) {
@@ -508,5 +512,4 @@ export class Kamijs {
         const groupId = await this.#resolveGroup(rawGroupId);
         return await this.db.get("SELECT c.* FROM characters c LEFT JOIN claims cl ON c.id = cl.char_id AND cl.group_id = ? WHERE cl.owner_jid IS NULL ORDER BY RANDOM() LIMIT 1", [groupId]); 
     }
-                        }
-    
+}
