@@ -14,22 +14,21 @@ export class TradeManager {
 
         const tradeId = crypto.randomBytes(3).toString('hex'); 
         
+        const timeoutId = setTimeout(() => {
+            this.activeTrades.delete(tradeId);
+        }, 5 * 60 * 1000);
+        
         const tradeData = {
             id: tradeId,
             proposerJid,
             targetJid,
             offeredCharId,
             requestedCharId,
-            expiresAt: Date.now() + (5 * 60 * 1000) 
+            expiresAt: Date.now() + (5 * 60 * 1000),
+            timeoutId 
         };
 
         this.activeTrades.set(tradeId, tradeData);
-
-        setTimeout(() => {
-            if (this.activeTrades.has(tradeId)) {
-                this.activeTrades.delete(tradeId);
-            }
-        }, 5 * 60 * 1000);
 
         return tradeData;
     }
@@ -47,6 +46,7 @@ export class TradeManager {
             const requested = await db.get("SELECT owner_id FROM characters WHERE id = ?", [trade.requestedCharId]);
 
             if (!offered || !requested || offered.owner_id !== trade.proposerJid || requested.owner_id !== trade.targetJid) {
+                clearTimeout(trade.timeoutId);
                 this.activeTrades.delete(tradeId);
                 throw new Error('OWNERSHIP_CHANGED_DURING_TRADE');
             }
@@ -60,6 +60,8 @@ export class TradeManager {
             `, [trade.id, trade.proposerJid, trade.targetJid, trade.offeredCharId, trade.requestedCharId, Date.now()]);
 
             await db.run("COMMIT");
+            
+            clearTimeout(trade.timeoutId);
             this.activeTrades.delete(tradeId);
             
             return true;
@@ -75,6 +77,8 @@ export class TradeManager {
         if (trade.proposerJid !== requesterJid && trade.targetJid !== requesterJid) {
             throw new Error('UNAUTHORIZED_CANCEL');
         }
+        
+        clearTimeout(trade.timeoutId);
         this.activeTrades.delete(tradeId);
         return true;
     }
