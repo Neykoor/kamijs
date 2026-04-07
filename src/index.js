@@ -20,13 +20,11 @@ export class Kamijs {
 
     async init() {
         this.db = await open({ filename: this.dbPath, driver: sqlite3.Database });
-        
         await this.db.exec(`
             PRAGMA busy_timeout = 5000;
             PRAGMA journal_mode = WAL;
             PRAGMA synchronous = NORMAL;
         `);
-
         await this.db.exec(`
             CREATE TABLE IF NOT EXISTS characters (
                 id TEXT PRIMARY KEY, 
@@ -54,7 +52,6 @@ export class Kamijs {
                 timestamp INTEGER
             );
         `);
-        
         if (!fs.existsSync(this.jsonPath)) {
             await fs.ensureDir('./database');
             await fs.writeJson(this.jsonPath, { characters: [] });
@@ -64,14 +61,11 @@ export class Kamijs {
     async addCharacter(data) {
         const { name, series, gender, booru_tag, value = 3000 } = data;
         if (!name || !series || !gender || !booru_tag) throw new Error('MISSING_REQUIRED_FIELDS');
-
         const charId = data.id || crypto.randomBytes(4).toString('hex');
-
         await this.db.run(
             "INSERT OR IGNORE INTO characters (id, name, series, gender, booru_tag, value) VALUES (?, ?, ?, ?, ?, ?)",
             [charId, name, series, gender, booru_tag, value]
         );
-        
         const backup = await fs.readJson(this.jsonPath);
         if (!backup.characters.find(c => c.id === charId)) {
             data.id = charId;
@@ -82,28 +76,23 @@ export class Kamijs {
 
     async bulkAddCharacters(dataArray) {
         if (!Array.isArray(dataArray)) throw new Error('INVALID_ARRAY');
-
         await this.db.run("BEGIN IMMEDIATE");
         const backup = await fs.readJson(this.jsonPath);
         let addedCount = 0;
-
         try {
             for (const char of dataArray) {
                 if (!char.name || !char.series || !char.gender || !char.booru_tag) continue;
                 const charId = char.id || crypto.randomBytes(4).toString('hex');
-
                 const result = await this.db.run(
                     "INSERT OR IGNORE INTO characters (id, name, series, gender, booru_tag, value) VALUES (?, ?, ?, ?, ?, ?)",
                     [charId, char.name, char.series, char.gender, char.booru_tag, char.value || 3000]
                 );
-
                 if (result.changes > 0 && !backup.characters.find(c => c.id === charId)) {
                     char.id = charId;
                     backup.characters.push(char);
                     addedCount++;
                 }
             }
-
             await this.db.run("COMMIT");
             if (addedCount > 0) await fs.writeJson(this.jsonPath, backup, { spaces: 2 });
             return addedCount;
@@ -113,26 +102,30 @@ export class Kamijs {
         }
     }
 
-    async #resolveCharacter(query, ownerJid = null) {
-        const isFree = !ownerJid;
-        const condition = isFree ? "owner_id IS NULL" : "owner_id = ?";
-        const params = isFree ? [query] : [query, ownerJid];
-        
-        let chars = await this.db.all(`SELECT id, name, series FROM characters WHERE id = ? AND ${condition}`, params);
-        
-        if (chars.length === 0) {
-            chars = await this.db.all(`SELECT id, name, series FROM characters WHERE LOWER(name) = LOWER(?) AND ${condition}`, params);
+    async #resolveCharacter(query, ownerJid = null, forceMode = 'auto', fullData = false) {
+        const select = fullData ? "*" : "id, name, series, booru_tag";
+        let condition, params;
+        if (forceMode === 'free') {
+            condition = "owner_id IS NULL";
+            params = [query];
+        } else if (forceMode === 'owned') {
+            condition = "owner_id = ?";
+            params = [query, ownerJid];
+        } else {
+            condition = "1=1"; 
+            params = [query];
         }
-
+        let chars = await this.db.all(`SELECT ${select} FROM characters WHERE id = ? AND ${condition}`, params);
         if (chars.length === 0) {
-            throw new Error(isFree ? 'CHARACTER_NOT_FOUND_OR_CLAIMED' : 'CHARACTER_NOT_OWNED');
+            chars = await this.db.all(`SELECT ${select} FROM characters WHERE LOWER(name) = LOWER(?) AND ${condition}`, params);
         }
-        
+        if (chars.length === 0) {
+            throw new Error(forceMode === 'free' ? 'CHARACTER_NOT_FOUND_OR_CLAIMED' : 'CHARACTER_NOT_FOUND');
+        }
         if (chars.length > 1) {
             const options = chars.map(c => `[ID: ${c.id}] ${c.name} (${c.series})`).join('\n');
             throw new Error(`AMBIGUOUS_QUERY:\n${options}`);
         }
-        
         return chars[0];
     }
 
@@ -156,7 +149,7 @@ export class Kamijs {
 
     async claim(sock, rawJid, query) {
         const jid = await LidGuard.clean(sock, rawJid);
-        const char = await this.#resolveCharacter(query, null);
+        const char = await this.#resolveCharacter(query, null, 'free');
         return await EconomyManager.processClaim(this.db, jid, char.id);
     }
 
@@ -164,27 +157,21 @@ export class Kamijs {
         const resolvedJid = await LidGuard.clean(sock, rawJid);
         const cd = this.cooldowns.isReady(resolvedJid);
         if (!cd.ready) return { error: 'COOLDOWN', remaining: cd.remaining };
-
         let user = await MercyIA.getProcessedUser(this.db, resolvedJid);
         if (!user) {
             const now = Date.now();
             await this.db.run("INSERT INTO users (jid, balance, last_interaction) VALUES (?, 0, ?)", [resolvedJid, now]);
             user = { jid: resolvedJid, balance: 0, stress_level: 0, last_interaction: now };
         }
-
         const isPity = MercyIA.shouldIntervene(user);
         const { sql, params } = MercyIA.getRollQuery(isPity, user.balance);
         let char = await this.db.get(sql, params);
-
         if (!char && isPity) {
             const normalRoll = MercyIA.getRollQuery(false, 0);
             char = await this.db.get(normalRoll.sql, normalRoll.params);
         }
-
         if (!char) return { error: 'NOT_FOUND' };
-
         await this.db.run("UPDATE users SET last_interaction = ? WHERE jid = ?", [Date.now(), resolvedJid]);
-
         return {
             id: char.id,
             name: char.name,
@@ -213,7 +200,7 @@ export class Kamijs {
     async listCharacter(sock, rawJid, query, price) {
         const jid = await LidGuard.clean(sock, rawJid);
         if (!price || price <= 0) throw new Error('INVALID_PRICE');
-        const char = await this.#resolveCharacter(query, jid);
+        const char = await this.#resolveCharacter(query, jid, 'owned');
         const result = await this.db.run("UPDATE characters SET market_price = ? WHERE id = ? AND owner_id = ?", [price, char.id, jid]);
         if (result.changes === 0) throw new Error('NOT_OWNER_OR_NOT_FOUND');
         return { success: true, name: char.name, price };
@@ -250,20 +237,25 @@ export class Kamijs {
 
     async getCharacterImage(query = null) {
         let finalName, finalTag;
-
         if (!query) {
             const randomChar = await this.db.get("SELECT booru_tag, name FROM characters ORDER BY RANDOM() LIMIT 1");
             if (!randomChar) throw new Error('NO_CHARACTERS_IN_DB');
             finalName = randomChar.name;
             finalTag = randomChar.booru_tag;
         } else {
-            const char = await this.db.get("SELECT name, booru_tag FROM characters WHERE LOWER(name) = LOWER(?) OR id = ?", [query, query]);
-            finalName = char ? char.name : query;
-            finalTag = char ? char.booru_tag : query;
+            const char = await this.#resolveCharacter(query, null, 'auto');
+            finalName = char.name;
+            finalTag = char.booru_tag;
         }
-
         const url = await ImageProvider.getRandomUrl(finalTag);
         return { name: finalName, url };
+    }
+
+    async getCharacterInfo(query) {
+        const char = await this.#resolveCharacter(query, null, 'auto', true);
+        char.imageUrl = await ImageProvider.getRandomUrl(char.booru_tag);
+        if (char.owner_id) char.ownerTag = `@${char.owner_id.split('@')[0]}`;
+        return char;
     }
 
     async proposeTrade(sock, proposerRawJid, targetRawJid, offeredQuery, requestedQuery) {
@@ -271,8 +263,8 @@ export class Kamijs {
         const targetJid = await LidGuard.clean(sock, targetRawJid);
         const cd = this.cooldowns.isReady(proposerJid, 'trade_propose', 60);
         if (!cd.ready) return { error: 'COOLDOWN', remaining: cd.remaining };
-        const offered = await this.#resolveCharacter(offeredQuery, proposerJid);
-        const requested = await this.#resolveCharacter(requestedQuery, targetJid);
+        const offered = await this.#resolveCharacter(offeredQuery, proposerJid, 'owned');
+        const requested = await this.#resolveCharacter(requestedQuery, targetJid, 'owned');
         const trade = await TradeManager.initiate(this.db, proposerJid, targetJid, offered.id, requested.id);
         this.cooldowns.confirm(proposerJid, 'trade_propose');
         return { success: true, trade, offeredRealName: offered.name, requestedRealName: requested.name };
@@ -300,13 +292,6 @@ export class Kamijs {
         return { success: true };
     }
 
-    async getCharacterById(charId) {
-        const char = await this.db.get("SELECT * FROM characters WHERE id = ?", [charId]);
-        if (!char) throw new Error('CHARACTER_NOT_FOUND');
-        char.imageUrl = await ImageProvider.getRandomUrl(char.booru_tag);
-        return char;
-    }
-
     async getRandomAvailable() {
         return await this.db.get("SELECT * FROM characters WHERE owner_id IS NULL ORDER BY RANDOM() LIMIT 1") || null;
     }
@@ -314,4 +299,5 @@ export class Kamijs {
     async getTopCharacters(limit = 10) {
         return await this.db.all("SELECT id, name, series, gender, votes FROM characters WHERE votes > 0 ORDER BY votes DESC LIMIT ?", [limit]);
     }
-}
+                }
+        
