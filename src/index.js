@@ -235,6 +235,14 @@ export class Kamijs {
         }
     }
 
+    async deleteClaim(sock, rawJid, query) {
+        const jid = await LidGuard.clean(sock, rawJid);
+        const char = await this.#resolveCharacter(query, jid, 'owned');
+        const result = await this.db.run("UPDATE characters SET owner_id = NULL, market_price = NULL WHERE id = ? AND owner_id = ?", [char.id, jid]);
+        if (result.changes === 0) throw new Error('NOT_OWNER_OR_NOT_FOUND');
+        return { success: true, charName: char.name };
+    }
+
     async getCharacterImage(query = null) {
         let finalName, finalTag;
         if (!query) {
@@ -299,5 +307,5 @@ export class Kamijs {
     async getTopCharacters(limit = 10) {
         return await this.db.all("SELECT id, name, series, gender, votes FROM characters WHERE votes > 0 ORDER BY votes DESC LIMIT ?", [limit]);
     }
-                }
-        
+                                                                                  }
+                                                  
