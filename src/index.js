@@ -248,6 +248,24 @@ export class Kamijs {
         }
     }
 
+    async getCharacterImage(query = null) {
+        let finalName, finalTag;
+
+        if (!query) {
+            const randomChar = await this.db.get("SELECT booru_tag, name FROM characters ORDER BY RANDOM() LIMIT 1");
+            if (!randomChar) throw new Error('NO_CHARACTERS_IN_DB');
+            finalName = randomChar.name;
+            finalTag = randomChar.booru_tag;
+        } else {
+            const char = await this.db.get("SELECT name, booru_tag FROM characters WHERE LOWER(name) = LOWER(?) OR id = ?", [query, query]);
+            finalName = char ? char.name : query;
+            finalTag = char ? char.booru_tag : query;
+        }
+
+        const url = await ImageProvider.getRandomUrl(finalTag);
+        return { name: finalName, url };
+    }
+
     async proposeTrade(sock, proposerRawJid, targetRawJid, offeredQuery, requestedQuery) {
         const proposerJid = await LidGuard.clean(sock, proposerRawJid);
         const targetJid = await LidGuard.clean(sock, targetRawJid);
@@ -296,4 +314,4 @@ export class Kamijs {
     async getTopCharacters(limit = 10) {
         return await this.db.all("SELECT id, name, series, gender, votes FROM characters WHERE votes > 0 ORDER BY votes DESC LIMIT ?", [limit]);
     }
-    }
+}
