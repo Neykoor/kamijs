@@ -192,9 +192,19 @@ export class Kamijs {
     async getUserProfile(sock, rawJid) {
         const jid = await LidGuard.clean(sock, rawJid);
         let user = await this.db.get("SELECT balance FROM users WHERE jid = ?", [jid]);
-        if (!user) return { balance: 0, characters: [], currencyName: this.currency };
+        if (!user) return { balance: 0, characters: [], currencyName: this.currency, cooldowns: { roll: 0, vote: 0 } };
         const characters = await this.db.all("SELECT id, name, series, value FROM characters WHERE owner_id = ? ORDER BY value DESC", [jid]);
-        return { balance: user.balance, currencyName: this.currency, characters };
+        const rollCd = this.cooldowns.isReady(jid);
+        const voteCd = this.cooldowns.isReady(jid, 'vote', 3600);
+        return { 
+            balance: user.balance, 
+            currencyName: this.currency, 
+            characters,
+            cooldowns: {
+                roll: rollCd.ready ? 0 : rollCd.remaining,
+                vote: voteCd.ready ? 0 : voteCd.remaining
+            }
+        };
     }
 
     async listCharacter(sock, rawJid, query, price) {
@@ -307,5 +317,4 @@ export class Kamijs {
     async getTopCharacters(limit = 10) {
         return await this.db.all("SELECT id, name, series, gender, votes FROM characters WHERE votes > 0 ORDER BY votes DESC LIMIT ?", [limit]);
     }
-                                                                                  }
-                                                  
+}
