@@ -7,6 +7,7 @@ import { Cooldowns } from './utils/Cooldowns.js';
 import sqlite3 from 'sqlite3';
 import { open } from 'sqlite';
 import fs from 'fs-extra';
+import crypto from 'crypto';
 
 export class Kamijs {
     constructor(config = {}) {
@@ -49,18 +50,19 @@ export class Kamijs {
     }
 
     async addCharacter(data) {
-        const { id, name, series, gender, booru_tag, value = 3000 } = data;
-        if (!id || !name || !series || !gender || !booru_tag) {
-            throw new Error('MISSING_REQUIRED_FIELDS');
-        }
+        const { name, series, gender, booru_tag, value = 3000 } = data;
+        if (!name || !series || !gender || !booru_tag) throw new Error('MISSING_REQUIRED_FIELDS');
+
+        const charId = data.id || crypto.randomBytes(4).toString('hex');
 
         await this.db.run(
             "INSERT OR IGNORE INTO characters (id, name, series, gender, booru_tag, value) VALUES (?, ?, ?, ?, ?, ?)",
-            [id, name, series, gender, booru_tag, value]
+            [charId, name, series, gender, booru_tag, value]
         );
         
         const backup = await fs.readJson(this.jsonPath);
-        if (!backup.characters.find(c => c.id === id)) {
+        if (!backup.characters.find(c => c.id === charId)) {
+            data.id = charId;
             backup.characters.push(data);
             await fs.writeJson(this.jsonPath, backup, { spaces: 2 });
         }
@@ -75,14 +77,17 @@ export class Kamijs {
 
         try {
             for (const char of dataArray) {
-                if (!char.id || !char.name || !char.series || !char.gender || !char.booru_tag) continue;
+                if (!char.name || !char.series || !char.gender || !char.booru_tag) continue;
+
+                const charId = char.id || crypto.randomBytes(4).toString('hex');
 
                 const result = await this.db.run(
                     "INSERT OR IGNORE INTO characters (id, name, series, gender, booru_tag, value) VALUES (?, ?, ?, ?, ?, ?)",
-                    [char.id, char.name, char.series, char.gender, char.booru_tag, char.value || 3000]
+                    [charId, char.name, char.series, char.gender, char.booru_tag, char.value || 3000]
                 );
 
-                if (result.changes > 0 && !backup.characters.find(c => c.id === char.id)) {
+                if (result.changes > 0 && !backup.characters.find(c => c.id === charId)) {
+                    char.id = charId;
                     backup.characters.push(char);
                     addedCount++;
                 }
@@ -97,6 +102,29 @@ export class Kamijs {
         }
     }
 
+    async #resolveCharacter(query, ownerJid = null) {
+        const isFree = !ownerJid;
+        const condition = isFree ? "owner_id IS NULL" : "owner_id = ?";
+        const params = isFree ? [query] : [query, ownerJid];
+        
+        let chars = await this.db.all(`SELECT id, name, series FROM characters WHERE id = ? AND ${condition}`, params);
+        
+        if (chars.length === 0) {
+            chars = await this.db.all(`SELECT id, name, series FROM characters WHERE LOWER(name) = LOWER(?) AND ${condition}`, params);
+        }
+
+        if (chars.length === 0) {
+            throw new Error(isFree ? 'CHARACTER_NOT_FOUND_OR_CLAIMED' : 'CHARACTER_NOT_OWNED');
+        }
+        
+        if (chars.length > 1) {
+            const options = chars.map(c => `[ID: ${c.id}] ${c.name} (${c.series})`).join('\n');
+            throw new Error(`AMBIGUOUS_QUERY:\n${options}`);
+        }
+        
+        return chars[0];
+    }
+
     async reportMissedClaim(sock, rawJid) {
         const jid = await LidGuard.clean(sock, rawJid);
         await this.db.run(
@@ -105,9 +133,10 @@ export class Kamijs {
         );
     }
 
-    async claim(sock, rawJid, charId) {
+    async claim(sock, rawJid, query) {
         const jid = await LidGuard.clean(sock, rawJid);
-        return await EconomyManager.processClaim(this.db, jid, charId);
+        const char = await this.#resolveCharacter(query, null);
+        return await EconomyManager.processClaim(this.db, jid, char.id);
     }
 
     async roll(sock, rawJid) {
@@ -171,17 +200,25 @@ export class Kamijs {
         };
     }
 
-    async proposeTrade(sock, proposerRawJid, targetRawJid, offeredCharId, requestedCharId) {
+    async proposeTrade(sock, proposerRawJid, targetRawJid, offeredQuery, requestedQuery) {
         const proposerJid = await LidGuard.clean(sock, proposerRawJid);
         const targetJid = await LidGuard.clean(sock, targetRawJid);
 
         const cd = this.cooldowns.isReady(proposerJid, 'trade_propose', 60);
         if (!cd.ready) return { error: 'COOLDOWN', remaining: cd.remaining };
 
-        const trade = await TradeManager.initiate(this.db, proposerJid, targetJid, offeredCharId, requestedCharId);
+        const offered = await this.#resolveCharacter(offeredQuery, proposerJid);
+        const requested = await this.#resolveCharacter(requestedQuery, targetJid);
+
+        const trade = await TradeManager.initiate(this.db, proposerJid, targetJid, offered.id, requested.id);
         this.cooldowns.confirm(proposerJid, 'trade_propose');
         
-        return { success: true, trade };
+        return { 
+            success: true, 
+            trade,
+            offeredRealName: offered.name,
+            requestedRealName: requested.name
+        };
     }
 
     async confirmTrade(sock, targetRawJid, tradeId) {
