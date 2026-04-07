@@ -29,17 +29,29 @@ export class Kamijs {
 
         await this.db.exec(`
             CREATE TABLE IF NOT EXISTS characters (
-                id TEXT PRIMARY KEY, name TEXT, series TEXT, 
-                gender TEXT, booru_tag TEXT, value INTEGER DEFAULT 3000, 
-                owner_id TEXT DEFAULT NULL, votes INTEGER DEFAULT 0
+                id TEXT PRIMARY KEY, 
+                name TEXT, 
+                series TEXT, 
+                gender TEXT, 
+                booru_tag TEXT, 
+                value INTEGER DEFAULT 3000, 
+                owner_id TEXT DEFAULT NULL, 
+                votes INTEGER DEFAULT 0,
+                market_price INTEGER DEFAULT NULL
             );
             CREATE TABLE IF NOT EXISTS users (
-                jid TEXT PRIMARY KEY, balance INTEGER DEFAULT 0, 
-                stress_level INTEGER DEFAULT 0, last_interaction INTEGER
+                jid TEXT PRIMARY KEY, 
+                balance INTEGER DEFAULT 0, 
+                stress_level INTEGER DEFAULT 0, 
+                last_interaction INTEGER
             );
             CREATE TABLE IF NOT EXISTS trade_history (
-                id TEXT PRIMARY KEY, proposer_jid TEXT, target_jid TEXT, 
-                offered_char TEXT, requested_char TEXT, timestamp INTEGER
+                id TEXT PRIMARY KEY, 
+                proposer_jid TEXT, 
+                target_jid TEXT, 
+                offered_char TEXT, 
+                requested_char TEXT, 
+                timestamp INTEGER
             );
         `);
         
@@ -78,7 +90,6 @@ export class Kamijs {
         try {
             for (const char of dataArray) {
                 if (!char.name || !char.series || !char.gender || !char.booru_tag) continue;
-
                 const charId = char.id || crypto.randomBytes(4).toString('hex');
 
                 const result = await this.db.run(
@@ -133,6 +144,16 @@ export class Kamijs {
         );
     }
 
+    async addBalance(sock, rawJid, amount) {
+        if (amount <= 0) throw new Error('INVALID_AMOUNT');
+        const jid = await LidGuard.clean(sock, rawJid);
+        const result = await this.db.run("UPDATE users SET balance = balance + ? WHERE jid = ?", [amount, jid]);
+        if (result.changes === 0) {
+            await this.db.run("INSERT INTO users (jid, balance, last_interaction) VALUES (?, ?, ?)", [jid, amount, Date.now()]);
+        }
+        return { success: true, amountAdded: amount };
+    }
+
     async claim(sock, rawJid, query) {
         const jid = await LidGuard.clean(sock, rawJid);
         const char = await this.#resolveCharacter(query, null);
@@ -141,7 +162,6 @@ export class Kamijs {
 
     async roll(sock, rawJid) {
         const resolvedJid = await LidGuard.clean(sock, rawJid);
-        
         const cd = this.cooldowns.isReady(resolvedJid);
         if (!cd.ready) return { error: 'COOLDOWN', remaining: cd.remaining };
 
@@ -184,41 +204,60 @@ export class Kamijs {
 
     async getUserProfile(sock, rawJid) {
         const jid = await LidGuard.clean(sock, rawJid);
-        
         let user = await this.db.get("SELECT balance FROM users WHERE jid = ?", [jid]);
         if (!user) return { balance: 0, characters: [], currencyName: this.currency };
+        const characters = await this.db.all("SELECT id, name, series, value FROM characters WHERE owner_id = ? ORDER BY value DESC", [jid]);
+        return { balance: user.balance, currencyName: this.currency, characters };
+    }
 
-        const characters = await this.db.all(
-            "SELECT id, name, series, value FROM characters WHERE owner_id = ? ORDER BY value DESC", 
-            [jid]
+    async listCharacter(sock, rawJid, query, price) {
+        const jid = await LidGuard.clean(sock, rawJid);
+        if (!price || price <= 0) throw new Error('INVALID_PRICE');
+        const char = await this.#resolveCharacter(query, jid);
+        const result = await this.db.run("UPDATE characters SET market_price = ? WHERE id = ? AND owner_id = ?", [price, char.id, jid]);
+        if (result.changes === 0) throw new Error('NOT_OWNER_OR_NOT_FOUND');
+        return { success: true, name: char.name, price };
+    }
+
+    async buyCharacter(sock, rawJid, query) {
+        const buyerJid = await LidGuard.clean(sock, rawJid);
+        const candidates = await this.db.all(
+            "SELECT id, name, owner_id, market_price FROM characters WHERE (id = ? OR LOWER(name) = LOWER(?)) AND market_price IS NOT NULL",
+            [query, query]
         );
-
-        return {
-            balance: user.balance,
-            currencyName: this.currency,
-            characters: characters
-        };
+        if (candidates.length === 0) throw new Error('NOT_FOR_SALE');
+        if (candidates.length > 1) {
+            const list = candidates.map(c => `[ID: ${c.id}] ${c.name} - ${c.market_price}¥`).join('\n');
+            throw new Error(`AMBIGUOUS_BUY:\n${list}`);
+        }
+        const target = candidates[0];
+        await this.db.run("BEGIN IMMEDIATE");
+        try {
+            const char = await this.db.get("SELECT owner_id, market_price, name FROM characters WHERE id = ? AND market_price IS NOT NULL", [target.id]);
+            if (!char) throw new Error('ALREADY_SOLD_OR_WITHDRAWN');
+            if (char.owner_id === buyerJid) throw new Error('ALREADY_OWNED_BY_YOU');
+            const updateBuyer = await this.db.run("UPDATE users SET balance = balance - ? WHERE jid = ? AND balance >= ?", [char.market_price, buyerJid, char.market_price]);
+            if (updateBuyer.changes === 0) throw new Error('INSUFFICIENT_FUNDS');
+            await this.db.run("UPDATE users SET balance = balance + ? WHERE jid = ?", [char.market_price, char.owner_id]);
+            await this.db.run("UPDATE characters SET owner_id = ?, market_price = NULL WHERE id = ?", [buyerJid, target.id]);
+            await this.db.run("COMMIT");
+            return { success: true, charName: char.name, price: char.market_price };
+        } catch (e) {
+            await this.db.run("ROLLBACK").catch(() => {});
+            throw e;
+        }
     }
 
     async proposeTrade(sock, proposerRawJid, targetRawJid, offeredQuery, requestedQuery) {
         const proposerJid = await LidGuard.clean(sock, proposerRawJid);
         const targetJid = await LidGuard.clean(sock, targetRawJid);
-
         const cd = this.cooldowns.isReady(proposerJid, 'trade_propose', 60);
         if (!cd.ready) return { error: 'COOLDOWN', remaining: cd.remaining };
-
         const offered = await this.#resolveCharacter(offeredQuery, proposerJid);
         const requested = await this.#resolveCharacter(requestedQuery, targetJid);
-
         const trade = await TradeManager.initiate(this.db, proposerJid, targetJid, offered.id, requested.id);
         this.cooldowns.confirm(proposerJid, 'trade_propose');
-        
-        return { 
-            success: true, 
-            trade,
-            offeredRealName: offered.name,
-            requestedRealName: requested.name
-        };
+        return { success: true, trade, offeredRealName: offered.name, requestedRealName: requested.name };
     }
 
     async confirmTrade(sock, targetRawJid, tradeId) {
@@ -233,16 +272,28 @@ export class Kamijs {
         return { success: true };
     }
 
-    async voteCharacter(charId) {
+    async voteCharacter(sock, rawJid, charId) {
+        const jid = await LidGuard.clean(sock, rawJid);
+        const cd = this.cooldowns.isReady(jid, 'vote', 3600); 
+        if (!cd.ready) return { error: 'COOLDOWN', remaining: cd.remaining };
         const result = await this.db.run("UPDATE characters SET votes = votes + 1 WHERE id = ?", [charId]);
         if (result.changes === 0) throw new Error('CHARACTER_NOT_FOUND');
-        return true;
+        this.cooldowns.confirm(jid, 'vote');
+        return { success: true };
+    }
+
+    async getCharacterById(charId) {
+        const char = await this.db.get("SELECT * FROM characters WHERE id = ?", [charId]);
+        if (!char) throw new Error('CHARACTER_NOT_FOUND');
+        char.imageUrl = await ImageProvider.getRandomUrl(char.booru_tag);
+        return char;
+    }
+
+    async getRandomAvailable() {
+        return await this.db.get("SELECT * FROM characters WHERE owner_id IS NULL ORDER BY RANDOM() LIMIT 1") || null;
     }
 
     async getTopCharacters(limit = 10) {
-        return await this.db.all(
-            "SELECT id, name, series, gender, votes FROM characters WHERE votes > 0 ORDER BY votes DESC LIMIT ?", 
-            [limit]
-        );
+        return await this.db.all("SELECT id, name, series, gender, votes FROM characters WHERE votes > 0 ORDER BY votes DESC LIMIT ?", [limit]);
     }
-}
+    }
