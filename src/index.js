@@ -245,6 +245,17 @@ export class Kamijs {
         }
     }
 
+    async getMarketplace(page = 1, limit = 10) {
+        const offset = (page - 1) * limit;
+        const count = await this.db.get("SELECT COUNT(*) as total FROM characters WHERE market_price IS NOT NULL");
+        const totalPages = Math.ceil(count.total / limit);
+        const items = await this.db.all(
+            "SELECT id, name, series, market_price, owner_id FROM characters WHERE market_price IS NOT NULL ORDER BY market_price ASC LIMIT ? OFFSET ?",
+            [limit, offset]
+        );
+        return { items, totalPages, currentPage: page, totalItems: count.total };
+    }
+
     async deleteClaim(sock, rawJid, query) {
         const jid = await LidGuard.clean(sock, rawJid);
         const char = await this.#resolveCharacter(query, jid, 'owned');
@@ -346,5 +357,5 @@ export class Kamijs {
     async getTopCharacters(limit = 10) {
         return await this.db.all("SELECT id, name, series, gender, votes FROM characters WHERE votes > 0 ORDER BY votes DESC LIMIT ?", [limit]);
     }
-                                                     }
-                          
+    }
+                                                                                                                            
