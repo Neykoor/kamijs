@@ -8,32 +8,27 @@ export class MercyIA {
     };
 
     static shouldIntervene(user) {
-        if (!user || typeof user.stress_level !== 'number' || user.stress_level < 0) {
-            return false;
-        }
-
-        if (user.stress_level >= this.CONFIG.HARD_PITY_THRESHOLD) {
-            return true;
-        }
-
+        if (!user || typeof user.stress_level !== 'number') return false;
+        if (user.stress_level >= this.CONFIG.HARD_PITY_THRESHOLD) return true;
         if (user.stress_level >= this.CONFIG.SOFT_PITY_THRESHOLD) {
             return Math.random() < this.CONFIG.INTERVENTION_CHANCE;
         }
-
         return false;
     }
 
-    static getRollQuery(userBalance = 0) {
-        if (userBalance >= this.CONFIG.RICH_THRESHOLD) {
+    static getRollQuery(isPity, userBalance, groupId = 'global') {
+        const base = "SELECT c.* FROM characters c LEFT JOIN claims cl ON c.id = cl.char_id AND cl.group_id = ? WHERE cl.owner_jid IS NULL";
+        
+        if (isPity || userBalance < this.CONFIG.RICH_THRESHOLD) {
             return {
-                sql: "SELECT * FROM characters WHERE value >= ? ORDER BY RANDOM() LIMIT 1",
-                params: [this.CONFIG.PREMIUM_VALUE_MIN]
+                sql: `${base} ORDER BY RANDOM() LIMIT 1`,
+                params: [groupId]
             };
         }
 
         return {
-            sql: "SELECT * FROM characters ORDER BY RANDOM() LIMIT 1",
-            params: []
+            sql: `${base} AND c.value >= ? ORDER BY RANDOM() LIMIT 1`,
+            params: [groupId, this.CONFIG.PREMIUM_VALUE_MIN]
         };
     }
 }
