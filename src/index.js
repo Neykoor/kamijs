@@ -132,7 +132,8 @@ export class Kamijs {
             throw e;
         }
     }
-        async roll(sock, rawJid, rawGroupId = 'global') {
+
+    async roll(sock, rawJid, rawGroupId = 'global') {
         const jid = await LidGuard.clean(sock, rawJid);
         const groupId = await this.#resolveGroup(rawGroupId);
         
