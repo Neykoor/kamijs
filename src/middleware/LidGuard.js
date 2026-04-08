@@ -2,17 +2,24 @@ export class LidGuard {
     static async clean(sock, rawJid) {
         if (!rawJid || typeof rawJid !== 'string') return rawJid;
 
-        const [userPart, domain] = rawJid.split('@');
-        const userId = userPart.split(':')[0];
-        const normalized = `${userId}@${domain || 's.whatsapp.net'}`.toLowerCase();
-
-        if (!sock?.lid?.resolve) return normalized;
+        if (!sock?.lid?.resolve) {
+            const [userPart, domain] = rawJid.split('@');
+            const userId = userPart.split(':')[0];
+            return `${userId}@${domain || 's.whatsapp.net'}`.toLowerCase();
+        }
 
         try {
             const resolved = await sock.lid.resolve(rawJid);
-            return (resolved || normalized).toLowerCase();
+            
+            if (!resolved) {
+                const [userPart, domain] = rawJid.split('@');
+                const userId = userPart.split(':')[0];
+                return `${userId}@${domain || 's.whatsapp.net'}`.toLowerCase();
+            }
+
+            return resolved.toLowerCase();
         } catch (e) {
-            return normalized;
+            return rawJid.toLowerCase();
         }
     }
 }
