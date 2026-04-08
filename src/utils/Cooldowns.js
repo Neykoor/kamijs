@@ -3,21 +3,28 @@ export class Cooldowns {
         this.pending = new Map();
     }
 
-    isReady(key, seconds = 60) {
+    isReady(key) {
         const now = Date.now();
         const record = this.pending.get(key);
-        const last = record ? record.ts : 0;
-        const diff = (now - last) / 1000;
+        
+        if (!record) return { ready: true };
 
-        if (diff < seconds) {
-            return { ready: false, remaining: Math.ceil(seconds - diff) };
+        const diff = now - record.ts;
+        if (diff < record.ttl) {
+            return { 
+                ready: false, 
+                remaining: Math.ceil((record.ttl - diff) / 1000) 
+            };
         }
 
         return { ready: true };
     }
 
-    confirm(key, seconds = 86400) {
-        this.pending.set(key, { ts: Date.now(), ttl: seconds * 1000 });
+    confirm(key, seconds = 60) {
+        this.pending.set(key, { 
+            ts: Date.now(), 
+            ttl: seconds * 1000 
+        });
 
         if (Math.random() < 0.05) {
             this.#cleanup();
