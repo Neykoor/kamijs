@@ -2,10 +2,9 @@ export class LidGuard {
     static async clean(sock, rawJid) {
         if (!rawJid || typeof rawJid !== 'string') return rawJid;
 
-        const basic = rawJid.split(':')[0].split('@')[0] + 
-                     (rawJid.includes('@g.us') ? '@g.us' : '@s.whatsapp.net');
-        
-        const normalized = basic.toLowerCase();
+        const [userPart, domain] = rawJid.split('@');
+        const userId = userPart.split(':')[0];
+        const normalized = `${userId}@${domain || 's.whatsapp.net'}`.toLowerCase();
 
         if (!sock?.lid?.resolve) return normalized;
 
