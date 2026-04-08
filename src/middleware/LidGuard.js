@@ -12,7 +12,6 @@ export class LidGuard {
             const resolved = await sock.lid.resolve(rawJid);
             return (resolved || normalized).toLowerCase();
         } catch (e) {
-            console.warn('[kamijs - LidGuard]: Fallo al resolver LID:', e.message);
             return normalized;
         }
     }
