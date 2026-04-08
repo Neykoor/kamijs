@@ -20,11 +20,10 @@
 | 🛡️ **Transacciones Atómicas** | `BEGIN IMMEDIATE` + modo WAL elimina race conditions en claims y compras simultáneas |
 | 🔄 **Sistema de Trades** | Intercambio de personajes con expiración automática (5 min) y verificación de propiedad en transacción |
 | 🏪 **Mercado Abierto** | Listado, compra y retiro de personajes con detección de ambigüedad por nombre |
-| 🖼️ **Imágenes Dinámicas** | URLs aleatorias en tiempo real desde Yande.re usando tags de booru con sintaxis correcta (`-rating:e`) |
-| ⏱️ **Cooldowns en Memoria** | Sistema de verificación y confirmación en dos pasos, sin escrituras en disco |
+| 🖼️ **Imágenes Dinámicas** | URLs aleatorias en tiempo real desde Yande.re usando tags de booru con paginación aleatoria y filtro de contenido explícito |
+| ⏱️ **Cooldowns en Memoria** | TTL por clave, cleanup probabilístico al 5%, sin escrituras en disco |
 | 🧬 **LidGuard Integrado** | Normaliza automáticamente todos los JIDs incluyendo sufijos de dispositivo (`:0`, `:1`) |
 | 💱 **Moneda Personalizable** | Configura el nombre de la moneda (`yenes`, `coins`, `rubíes`, etc.) |
-| 💬 **Mensaje de Claim Personalizado** | Cada usuario puede definir su propio texto de captura |
 | 📦 **Carga Masiva** | `bulkAddCharacters()` carga miles de personajes en una sola transacción SQL por chunks de 50 |
 
 ---
@@ -59,7 +58,6 @@ import { Kamijs } from 'kamijs';
 
 const gacha = new Kamijs({
     dbPath: './database/gacha.db',
-    jsonPath: './database/characters.json',
     currency: 'yenes'
 });
 
@@ -69,19 +67,19 @@ await gacha.init();
 ### 2. Roll (`#rw`)
 
 ```js
-const result = await gacha.roll(sock, m.sender);
-
-if (result.error === 'COOLDOWN') return reply(`⏳ Espera ${result.remaining}s.`);
-if (result.error === 'NOT_FOUND') return reply(`❌ No hay personajes disponibles.`);
-
 try {
+    const result = await gacha.roll(sock, m.sender);
+
     await sock.sendMessage(m.chat, {
         image: { url: result.imageUrl },
         caption: `🌟 *${result.name}*\n📺 ${result.series}\n💰 ${result.value} ${result.currencyName}`
     });
-    gacha.confirmRoll(result.resolvedJid); // Síncrono. Solo confirmar si el envío fue exitoso
 } catch (err) {
-    console.error('[kamijs] Error de red, cooldown no aplicado.');
+    if (err.message.startsWith('COOLDOWN:')) {
+        const remaining = err.message.split(':')[1];
+        return reply(`⏳ Espera ${remaining}s.`);
+    }
+    throw err;
 }
 ```
 
@@ -90,7 +88,7 @@ try {
 ```js
 try {
     const result = await gacha.claim(sock, m.sender, charName);
-    reply(result.customMsg || '🎉 ¡Personaje reclamado!');
+    reply('🎉 ¡Personaje reclamado!');
 } catch (err) {
     if (err.message === 'ALREADY_CLAIMED') {
         await gacha.reportMissedClaim(sock, m.sender);
@@ -114,7 +112,7 @@ await gacha.listCharacter(sock, m.sender, 'Marin Kitagawa', 5000);
 // Comprar
 try {
     const result = await gacha.buyCharacter(sock, m.sender, 'Marin Kitagawa');
-    reply(`✅ Compraste a ${result.charName} por ${result.price}¥`);
+    reply(`✅ Compraste a ${result.name} por ${result.price}¥`);
 } catch (err) {
     if (err.message.startsWith('AMBIGUOUS_BUY')) {
         reply(`Hay varias en venta, elige por ID:\n${err.message.replace('AMBIGUOUS_BUY:\n', '')}`);
@@ -154,7 +152,7 @@ await gacha.addCharacter({
 ### 🎲 Núcleo del juego
 
 #### `await gacha.roll(sock, jid, groupId?)`
-Ejecuta un roll para el usuario. Activa el análisis de la IA de Compasión automáticamente. El cooldown **no** se aplica hasta llamar a `confirmRoll`.
+Ejecuta un roll para el usuario. Activa el análisis de la IA de Compasión automáticamente.
 
 **Retorna:**
 ```js
@@ -163,25 +161,20 @@ Ejecuta un roll para el usuario. Activa el análisis de la IA de Compasión auto
     currencyName: 'yenes',
     imageUrl: 'https://...',
     pityActive: false,
-    resolvedJid: '521234567890@s.whatsapp.net',
+    jid: '521234567890@s.whatsapp.net',
     groupId: 'global'
 }
 ```
-**Errores (en objeto, no throw):** `{ error: 'COOLDOWN', remaining: 42 }` · `{ error: 'NOT_FOUND' }`
-
----
-
-#### `gacha.confirmRoll(resolvedJid)`
-**Síncrono.** Aplica el cooldown de roll. Debe llamarse **solo** después de enviar el mensaje exitosamente. Recibe el `resolvedJid` que retorna `roll()`, no el JID crudo.
+**Throws:** `COOLDOWN:<segundos>` · `CHARACTER_NOT_FOUND`
 
 ---
 
 #### `await gacha.claim(sock, jid, query, groupId?)`
-Compra un personaje libre. Acepta nombre o ID como `query`. Ejecuta en transacción atómica.
+Compra un personaje libre. Acepta nombre o ID como `query`. Ejecuta en transacción atómica. La disponibilidad del personaje se verifica dentro de la transacción para evitar race conditions.
 
-**Retorna:** `{ success: true, charId, charName, customMsg }`
+**Retorna:** `{ success: true, charId, charName }`
 
-**Throws:** `CHARACTER_NOT_FOUND_OR_CLAIMED` · `ALREADY_CLAIMED` · `INSUFFICIENT_FUNDS` · `AMBIGUOUS_QUERY:\n[lista de IDs]`
+**Throws:** `CHARACTER_NOT_FOUND` · `ALREADY_CLAIMED` · `INSUFFICIENT_FUNDS` · `AMBIGUOUS_QUERY:\n[lista de IDs]`
 
 ---
 
@@ -223,9 +216,11 @@ Pone un personaje en venta. Valida propiedad con doble capa de seguridad.
 ---
 
 #### `await gacha.buyCharacter(sock, jid, query, groupId?)`
-Compra un personaje del mercado en transacción atómica. Si hay varios con el mismo nombre en venta, lanza `AMBIGUOUS_BUY` con la lista de IDs.
+Compra un personaje del mercado en transacción atómica. Toda la lógica — lectura de candidatos, verificación de fondos y transferencia — ocurre dentro de `BEGIN IMMEDIATE`. Si hay varios con el mismo nombre en venta, lanza `AMBIGUOUS_BUY` con la lista de IDs.
 
-**Throws:** `NOT_FOR_SALE` · `AMBIGUOUS_BUY:\n[lista]` · `ALREADY_SOLD_OR_WITHDRAWN` · `ALREADY_OWNED_BY_YOU` · `INSUFFICIENT_FUNDS`
+**Retorna:** `{ success: true, name, price }`
+
+**Throws:** `NOT_FOR_SALE` · `AMBIGUOUS_BUY:\n[lista]` · `ALREADY_OWNED_BY_YOU` · `INSUFFICIENT_FUNDS`
 
 ---
 
@@ -262,13 +257,11 @@ Transfiere toda la colección en una sola transacción atómica.
 ### 🔄 Trades
 
 #### `await gacha.proposeTrade(sock, fromJid, toJid, offeredQuery, requestedQuery, groupId?)`
-Propone un intercambio. Expira en **5 minutos**. El cooldown solo se consume si el INSERT en DB es exitoso.
+Propone un intercambio. Expira en **5 minutos**. Los trades pendientes se almacenan en SQLite y sobreviven reinicios.
 
 **Retorna:** `{ success: true, tradeId, offeredRealName, requestedRealName }`
 
-**Throws:** `COOLDOWN` (como objeto) · `CHARACTER_NOT_FOUND` · `TRADE_CREATION_FAILED`
-
-> ⚠️ Los trades pendientes se almacenan en SQLite, no en memoria, por lo que sobreviven reinicios.
+**Throws:** `COOLDOWN:<segundos>` · `CHARACTER_NOT_FOUND` · `TRADE_CREATION_FAILED`
 
 ---
 
@@ -337,7 +330,7 @@ Vota por un personaje. Cooldown de **1 hora** por usuario. Los votos son globale
 
 **Retorna:** `{ name, newVotes }`
 
-**Errores (en objeto):** `{ error: 'COOLDOWN', remaining: N }`
+**Throws:** `COOLDOWN:<segundos>`
 
 ---
 
@@ -375,8 +368,6 @@ Cambia el modo del grupo. Solo funciona con JIDs que terminen en `@g.us`.
 | `gender` | string | ✅ | — |
 | `booru_tag` | string | ✅ | — |
 | `value` | number | ❌ | `3000` |
-
-> Mantiene sincronía con el backup JSON automáticamente.
 
 ---
 
@@ -447,7 +438,7 @@ El Mercy System de kamijs es un **pity de disponibilidad y billetera**, no de ra
 3. Con estrés ≥ 5, la intervención es **garantizada**.
 4. Cuando interviene, filtra solo personajes **libres** (sin dueño en el grupo actual).
 5. Si no encuentra personajes libres, hace fallback a roll normal.
-6. Adicionalmente, si el usuario tiene saldo ≥ 50,000, el roll normal prioriza personajes con `value ≥ 4,000`.
+6. Adicionalmente, si el usuario tiene saldo ≥ 50,000, el roll prioriza personajes con `value ≥ 4,000` que también estén libres.
 7. El estrés **decae naturalmente**: por cada 24 horas de inactividad baja 1 punto.
 
 ---
