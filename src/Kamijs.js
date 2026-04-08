@@ -1,10 +1,12 @@
+import fs from 'fs';
+import path from 'path';
+import sqlite3 from 'sqlite3';
+import { open } from 'sqlite';
+import crypto from 'crypto';
 import { LidGuard } from './middleware/LidGuard.js';
 import { ImageProvider } from './core/ImageProvider.js';
 import { MercyIA } from './core/MercyIA.js';
 import { Cooldowns } from './utils/Cooldowns.js';
-import sqlite3 from 'sqlite3';
-import { open } from 'sqlite';
-import crypto from 'crypto';
 
 export class Kamijs {
     constructor(config = {}) {
@@ -15,6 +17,11 @@ export class Kamijs {
     }
 
     async init() {
+        const dir = path.dirname(this.dbPath);
+        if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+        }
+
         this.db = await open({ filename: this.dbPath, driver: sqlite3.Database });
         
         await this.db.exec(`
@@ -285,17 +292,15 @@ export class Kamijs {
         const select = "SELECT c.id, c.name, c.booru_tag, c.value, cl.owner_jid";
         const from = "FROM characters c LEFT JOIN claims cl ON c.id = cl.char_id AND cl.group_id = ?";
         let where = "";
-        let params = [];
+        let params = [groupId, query, query];
 
         if (forceMode === 'free') {
             where = "WHERE (c.id = ? OR LOWER(c.name) = LOWER(?)) AND cl.owner_jid IS NULL";
-            params = [groupId, query, query];
         } else if (forceMode === 'owned') {
             where = "WHERE (c.id = ? OR LOWER(c.name) = LOWER(?)) AND cl.owner_jid = ?";
-            params = [groupId, query, query, ownerJid];
+            params.push(ownerJid);
         } else {
             where = "WHERE (c.id = ? OR LOWER(c.name) = LOWER(?))";
-            params = [groupId, query, query];
         }
 
         const chars = await this.db.all(`${select} ${from} ${where}`, params);
@@ -315,5 +320,4 @@ export class Kamijs {
         const group = await this.db.get("SELECT mode FROM groups WHERE id = ?", [rawGroupId]);
         return group?.mode === 'private' ? rawGroupId : 'global';
     }
-    }
-                            
+            }
