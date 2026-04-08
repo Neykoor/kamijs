@@ -4,13 +4,11 @@ import { MercyIA } from './core/MercyIA.js';
 import { Cooldowns } from './utils/Cooldowns.js';
 import sqlite3 from 'sqlite3';
 import { open } from 'sqlite';
-import fs from 'fs-extra';
 import crypto from 'crypto';
 
 export class Kamijs {
     constructor(config = {}) {
         this.dbPath = config.dbPath || './database/gacha.db';
-        this.jsonPath = config.jsonPath || './database/characters.json';
         this.currency = config.currency || 'yenes';
         this.db = null;
         this.cooldowns = new Cooldowns();
@@ -77,6 +75,7 @@ export class Kamijs {
 
     async deleteCharacter(query) {
         const chars = await this.db.all("SELECT id, name, series FROM characters WHERE id = ? OR LOWER(name) = LOWER(?)", [query, query]);
+        
         if (chars.length === 0) throw new Error('CHARACTER_NOT_FOUND');
         if (chars.length > 1) {
             const list = chars.map(c => `[ID: ${c.id}] ${c.name} (${c.series})`).join('\n');
@@ -105,6 +104,7 @@ export class Kamijs {
         await this.db.run("BEGIN IMMEDIATE");
         try {
             let user = await this.db.get("SELECT * FROM group_users WHERE jid = ? AND group_id = ?", [jid, groupId]);
+            
             if (!user) {
                 await this.db.run("INSERT INTO group_users (jid, group_id, balance, stress_level, last_interaction) VALUES (?, ?, 0, 0, ?)", [jid, groupId, now]);
                 user = { jid, balance: 0, stress_level: 0, last_interaction: now };
@@ -186,7 +186,6 @@ export class Kamijs {
 
         await this.db.run("BEGIN IMMEDIATE");
         try {
-            // AHORA PREVENTIVO: Resolución dentro de la transacción
             const char = await this.#resolveCharacter(query, null, 'free', groupId);
             const user = await this.db.get("SELECT balance FROM group_users WHERE jid = ? AND group_id = ?", [jid, groupId]);
             
@@ -199,7 +198,6 @@ export class Kamijs {
             return { success: true, charId: char.id, charName: char.name };
         } catch (e) {
             await this.db.run("ROLLBACK");
-            // Mantenemos el catch por si acaso, aunque ahora la lógica es preventiva
             if (e.message?.includes('UNIQUE')) throw new Error('ALREADY_CLAIMED');
             throw e;
         }
@@ -235,5 +233,4 @@ export class Kamijs {
         const group = await this.db.get("SELECT mode FROM groups WHERE id = ?", [rawGroupId]);
         return group?.mode === 'private' ? rawGroupId : 'global';
     }
-    }
-    
+}
