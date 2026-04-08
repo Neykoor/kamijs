@@ -5,7 +5,8 @@ export class ImageProvider {
 
         try {
             const query = encodeURIComponent(`${tag} -rating:e`);
-            const url = `https://yande.re/post.json?tags=${query}&limit=25`;
+            const page = Math.floor(Math.random() * 5) + 1;
+            const url = `https://yande.re/post.json?tags=${query}&limit=25&page=${page}`;
             
             const response = await fetch(url, {
                 signal: controller.signal,
@@ -17,19 +18,12 @@ export class ImageProvider {
             if (!response.ok) throw new Error(`HTTP_${response.status}`);
             
             const data = await response.json();
-                        if (!Array.isArray(data) || !data.length) return null;
+            if (!Array.isArray(data) || !data.length) return null;
 
             const randomPost = data[Math.floor(Math.random() * data.length)];
-            const finalUrl = randomPost.file_url || randomPost.sample_url;
-
-            if (finalUrl) {
-                console.log(`[Kamijs - Debug] Imagen encontrada para ${tag}: ${finalUrl}`);
-            }
-
-            return finalUrl;
+            return randomPost.file_url || randomPost.sample_url;
             
         } catch (e) {
-            console.warn(`[Kamijs - ImageProvider] Fallo para ${tag}:`, e.message);
             return null;
         } finally {
             clearTimeout(timeout);
