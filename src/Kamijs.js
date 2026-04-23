@@ -68,6 +68,12 @@ export class Kamijs {
                 balance INTEGER DEFAULT 0
             );
 
+            CREATE TABLE IF NOT EXISTS banner_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                series TEXT,
+                used_at INTEGER
+            );
+
             INSERT OR IGNORE INTO bank (id, balance) VALUES (1, 0);
         `);
 
@@ -128,9 +134,26 @@ export class Kamijs {
 
         if (banner && banner.expires_at > now) return null;
 
-        const randomSeries = await this.db.get(
-            `SELECT series FROM characters GROUP BY series ORDER BY RANDOM() LIMIT 1`
+        const history = await this.db.all(
+            `SELECT series FROM banner_history ORDER BY used_at DESC LIMIT 3`
         );
+        const excluded = history.map(r => r.series);
+
+        let randomSeries;
+        if (excluded.length > 0) {
+            const placeholders = excluded.map(() => '?').join(', ');
+            randomSeries = await this.db.get(
+                `SELECT series FROM characters WHERE series NOT IN (${placeholders}) GROUP BY series ORDER BY RANDOM() LIMIT 1`,
+                excluded
+            );
+        }
+
+        if (!randomSeries) {
+            randomSeries = await this.db.get(
+                `SELECT series FROM characters GROUP BY series ORDER BY RANDOM() LIMIT 1`
+            );
+        }
+
         if (!randomSeries) return null;
 
         const featured = await this.db.get(
@@ -141,6 +164,16 @@ export class Kamijs {
 
         const title = `✨ Banner de ${randomSeries.series}`;
         const expiresAt = await this.setBanner(title, randomSeries.series, featured.id);
+
+        await this.db.run(
+            `INSERT INTO banner_history (series, used_at) VALUES (?, ?)`,
+            [randomSeries.series, now]
+        );
+        await this.db.run(
+            `DELETE FROM banner_history WHERE id NOT IN (
+                SELECT id FROM banner_history ORDER BY used_at DESC LIMIT 3
+            )`
+        );
 
         return { title, series: randomSeries.series, featured, expiresAt };
     }
@@ -385,4 +418,5 @@ export class Kamijs {
             params
         );
     }
-}
+                }
+                        
