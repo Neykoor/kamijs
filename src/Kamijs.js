@@ -74,6 +74,12 @@ export class Kamijs {
     // --- MÉTODOS ADMINISTRATIVOS ---
 
     async addCharacter(data) {
+        const existing = await this.db.get(
+            `SELECT id FROM characters WHERE LOWER(name) = LOWER(?) AND LOWER(series) = LOWER(?)`,
+            [data.name, data.series]
+        );
+        if (existing) throw new Error('DUPLICATE_CHARACTER');
+
         const charId = data.id || crypto.randomBytes(4).toString('hex');
         await this.db.run(
             `INSERT INTO characters (id, name, series, gender, booru_tag, value)
