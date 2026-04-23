@@ -305,6 +305,8 @@ export class Kamijs {
         let luck = user.luck ?? 0;
         let bankAccrued = 0;
         let hitOccurred = false;
+        // IDs obtenidos en ESTA tirada para evitar duplicados intra-pull
+        const pulledThisSession = new Set();
 
         await this.db.run('BEGIN IMMEDIATE');
         try {
@@ -344,16 +346,16 @@ export class Kamijs {
                                 'SELECT * FROM characters WHERE id = ?',
                                 [banner.featured_id]
                             );
-                            if (!char) char = await this._getRandom('global', null, null);
+                            if (!char) char = await this._getRandom('global', null, null, pulledThisSession);
                             p = 0;
                             g = 0;
                         } else {
-                            char = await this._getRandom('global', null, banner.featured_id);
+                            char = await this._getRandom('global', null, banner.featured_id, pulledThisSession);
                             g = 1;
                             p = 0;
                         }
                     } else {
-                        char = await this._getRandom('global', null, null);
+                        char = await this._getRandom('global', null, null, pulledThisSession);
                         p = 0;
                     }
 
@@ -372,18 +374,20 @@ export class Kamijs {
                 } else {
                     luck = Math.min(luck + 0.001, 0.02);
                     const excludeId = isBannerMode ? banner.featured_id : null;
-                    char = await this._getRandom(type, banner, excludeId);
+                    char = await this._getRandom(type, banner, excludeId, pulledThisSession);
                 }
 
                 if (!char) throw new Error('EMPTY_POOL');
 
                 if (isHit) {
-                    const existing = await this.db.get(
+                    const existingInDb = await this.db.get(
                         'SELECT 1 FROM claims WHERE char_id = ? AND owner_jid = ? AND group_id = ?',
                         [char.id, userJid, groupId]
                     );
+                    // También es repetido si ya salió en esta misma tirada
+                    const existingInSession = pulledThisSession.has(char.id);
 
-                    if (existing) {
+                    if (existingInDb || existingInSession) {
                         isRepeat = true;
                         const charValue = char.value || 0;
                         repeatCompensation = Math.floor(charValue * 0.30);
@@ -393,8 +397,9 @@ export class Kamijs {
                             [repeatCompensation, userJid]
                         );
                     } else {
+                        pulledThisSession.add(char.id);
                         await this.db.run(
-                            `INSERT OR IGNORE INTO claims (char_id, owner_jid, group_id, claimed_at)
+                            `INSERT INTO claims (char_id, owner_jid, group_id, claimed_at)
                              VALUES (?, ?, ?, ?)`,
                             [char.id, userJid, groupId, Date.now()]
                         );
@@ -426,7 +431,7 @@ export class Kamijs {
         }
     }
 
-    async _getRandom(type, banner, excludeId) {
+    async _getRandom(type, banner, excludeId, excludeSet = new Set()) {
         const conditions = [];
         const params = [];
 
@@ -440,11 +445,19 @@ export class Kamijs {
             params.push(excludeId);
         }
 
+        // Excluir personajes ya obtenidos en esta tirada
+        if (excludeSet.size > 0) {
+            const placeholders = Array.from(excludeSet).map(() => '?').join(', ');
+            conditions.push(`id NOT IN (${placeholders})`);
+            params.push(...excludeSet);
+        }
+
         const where = conditions.length > 0 ? ' WHERE ' + conditions.join(' AND ') : '';
         return await this.db.get(
             `SELECT * FROM characters${where} ORDER BY RANDOM() LIMIT 1`,
             params
         );
     }
-                }
+}
 
+        
