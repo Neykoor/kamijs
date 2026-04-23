@@ -1,5 +1,6 @@
 export class ImageProvider {
     static async #fetchPosts(tag) {
+        if (!tag || typeof tag !== 'string') return null;
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 8000);
         try {
@@ -17,6 +18,7 @@ export class ImageProvider {
 
     static async getRandomUrl(tag) {
         try {
+            if (!tag || typeof tag !== 'string') return null;
             const cleanTag = tag.replace(/\s+/g, '_').toLowerCase();
             let data = await this.#fetchPosts(cleanTag);
 
