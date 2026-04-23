@@ -89,6 +89,10 @@ export class Kamijs {
         return charId;
     }
 
+    async getCharacter(id) {
+        return await this.db.get('SELECT * FROM characters WHERE id = ?', [id]);
+    }
+
     async setBanner(title, series, featuredId) {
         await this.db.run(
             `INSERT INTO active_banner (id, title, series_target, featured_id)
@@ -341,4 +345,4 @@ export class Kamijs {
             params
         );
     }
-}
+                }
