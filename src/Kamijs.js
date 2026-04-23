@@ -44,7 +44,6 @@ export class Kamijs {
                 has_guaranteed INTEGER DEFAULT 0
             );
 
-            -- Tabla de inventario
             CREATE TABLE IF NOT EXISTS claims (
                 char_id TEXT,
                 owner_jid TEXT,
@@ -55,15 +54,44 @@ export class Kamijs {
         `);
     }
 
-    /**
-     * Motor de 10 tiradas con registro automático de propiedad.
-     */
+    // --- MÉTODOS ADMINISTRATIVOS ---
+
+    async addCharacter(data) {
+        const charId = data.id || crypto.randomBytes(4).toString('hex');
+        await this.db.run(
+            `INSERT INTO characters (id, name, series, gender, booru_tag, value) VALUES (?, ?, ?, ?, ?, ?)`,
+            [charId, data.name, data.series, data.gender, data.booru_tag || data.name, data.value || 3000]
+        );
+        return charId;
+    }
+
+    async setBanner(title, series, featuredId) {
+        await this.db.run(
+            `INSERT INTO active_banner (id, title, series_target, featured_id) 
+             VALUES (1, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET 
+             title=excluded.title, series_target=excluded.series_target, featured_id=excluded.featured_id`,
+            [title, series, featuredId]
+        );
+    }
+
+    async deposit(jid, amount, sock) {
+        const userJid = await LidGuard.clean(sock, jid);
+        await this.db.run(
+            `INSERT INTO users (jid, balance) VALUES (?, ?) ON CONFLICT(jid) DO UPDATE SET balance = balance + ?`,
+            [userJid, amount, amount]
+        );
+    }
+
+    // --- MOTOR DE TIRADAS ---
+
     async pull10(jid, type = 'banner', options = {}) {
         const { sock, groupId = 'global' } = options;
         const userJid = await LidGuard.clean(sock, jid);
         
+        await this.db.run("INSERT OR IGNORE INTO users (jid, balance) VALUES (?, 0)", [userJid]);
         const user = await this.db.get("SELECT * FROM users WHERE jid = ?", [userJid]);
-        if (!user || user.balance < 4000) throw new Error('INSUFFICIENT_FUNDS');
+        
+        if (user.balance < 4000) throw new Error('INSUFFICIENT_FUNDS');
 
         const banner = await this.db.get("SELECT * FROM active_banner WHERE id = 1");
         if (!banner && type === 'banner') throw new Error('NO_ACTIVE_BANNER');
@@ -72,7 +100,6 @@ export class Kamijs {
         let p = user.pity_count;
         let g = user.has_guaranteed;
 
-        // Iniciamos transacción para que todo sea atómico
         await this.db.run("BEGIN IMMEDIATE");
         try {
             for (let i = 0; i < 10; i++) {
@@ -80,23 +107,32 @@ export class Kamijs {
                 let char;
                 let isFeatured = false;
 
-                // Lógica de Suerte / Pity
+                // Lógica de Suerte (3%) o Pity (160)
                 if (p >= 160 || Math.random() < 0.03) {
-                    if (g === 1 || p >= 160 || Math.random() > 0.5) {
-                        char = await this.db.get("SELECT * FROM characters WHERE id = ?", [banner.featured_id]);
-                        isFeatured = true;
-                        p = 0; g = 0;
+                    if (type === 'banner') {
+                        // MODO BANNER: 50/50 contra el destacado del mes
+                        if (g === 1 || p >= 160 || Math.random() > 0.5) {
+                            char = await this.db.get("SELECT * FROM characters WHERE id = ?", [banner.featured_id]);
+                            isFeatured = true;
+                            p = 0; g = 0;
+                        } else {
+                            // Perdió 50/50: Saca cualquier otro personaje y activa garantizado
+                            char = await this._getRandom('global', banner, true);
+                            g = 1; p = 0;
+                            isFeatured = true; // Sigue siendo un "Hit" (✔️) aunque no sea el principal
+                        }
                     } else {
-                        char = await this._getRandom(type, banner, true);
-                        g = 1; p = 0;
+                        // MODO RW: Cualquier personaje puede ser un "Hit" (✔️)
+                        char = await this._getRandom('global', banner, false);
+                        isFeatured = true;
+                        p = 0; 
                     }
                 } else {
+                    // Tirada Normal (❌)
                     char = await this._getRandom(type, banner, false);
                 }
 
                 if (char) {
-                    // ¡AJUSTE CLAVE!: Registrar el personaje automáticamente para el usuario
-                    // Usamos INSERT OR IGNORE por si ya lo tenía de un pull anterior
                     await this.db.run(
                         `INSERT OR IGNORE INTO claims (char_id, owner_jid, group_id, claimed_at) VALUES (?, ?, ?, ?)`,
                         [char.id, userJid, groupId, Date.now()]
@@ -105,7 +141,6 @@ export class Kamijs {
                 }
             }
 
-            // Descontar saldo y actualizar contadores
             await this.db.run(
                 "UPDATE users SET balance = balance - 4000, pity_count = ?, has_guaranteed = ? WHERE jid = ?",
                 [p, g, userJid]
@@ -119,17 +154,29 @@ export class Kamijs {
         }
     }
 
+    /**
+     * Selector aleatorio inteligente
+     */
     async _getRandom(type, banner, excludeFeatured) {
         let sql = "SELECT * FROM characters";
         let params = [];
-        if (type === 'banner') {
-            sql += " WHERE series = ?";
+        let conditions = [];
+
+        if (type === 'banner' && banner) {
+            // Solo personajes de la serie del banner
+            conditions.push("series = ?");
             params.push(banner.series_target);
-            if (excludeFeatured) { sql += " AND id != ?"; params.push(banner.featured_id); }
-        } else if (excludeFeatured) {
-            sql += " WHERE id != ?";
+        }
+
+        if (excludeFeatured && banner?.featured_id) {
+            conditions.push("id != ?");
             params.push(banner.featured_id);
         }
+
+        if (conditions.length > 0) {
+            sql += " WHERE " + conditions.join(" AND ");
+        }
+
         return await this.db.get(sql + " ORDER BY RANDOM() LIMIT 1", params);
     }
 }
