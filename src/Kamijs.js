@@ -327,6 +327,7 @@ export class Kamijs {
                                 'SELECT * FROM characters WHERE id = ?',
                                 [banner.featured_id]
                             );
+                            if (!char) char = await this._getRandom('global', null, null);
                             p = 0;
                             g = 0;
                         } else {
@@ -419,4 +420,4 @@ export class Kamijs {
         );
     }
                 }
-                        
+
