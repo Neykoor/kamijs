@@ -5,9 +5,15 @@ import { open } from 'sqlite';
 import crypto from 'crypto';
 import { LidGuard } from './middleware/LidGuard.js';
 
-const PULL_COST = 4000;
-const PITY_LIMIT = 160;
-const HIT_RATE = 0.03;
+const PULL_COST       = 4000;
+
+const HIT_RATE_RW     = 0.015;
+const HIT_RATE_BANNER = 0.025;
+
+const PITY_LIMIT_RW     = 200;
+const PITY_LIMIT_BANNER = 160;
+
+const REPEAT_CAP      = 2000;
 
 export class Kamijs {
     constructor(config = {}) {
@@ -55,6 +61,13 @@ export class Kamijs {
                 claimed_at INTEGER,
                 PRIMARY KEY (char_id, group_id)
             );
+
+            CREATE TABLE IF NOT EXISTS bank (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                balance INTEGER DEFAULT 0
+            );
+
+            INSERT OR IGNORE INTO bank (id, balance) VALUES (1, 0);
         `);
     }
 
@@ -92,40 +105,128 @@ export class Kamijs {
         );
     }
 
+    // --- BANCO ---
+
+    async getBank() {
+        const row = await this.db.get('SELECT balance FROM bank WHERE id = 1');
+        return row?.balance ?? 0;
+    }
+
+    async withdrawBank(amount, toJid, sock) {
+        const userJid = await LidGuard.clean(sock, toJid);
+        const bank = await this.getBank();
+        if (bank < amount) throw new Error('BANK_INSUFFICIENT_FUNDS');
+
+        await this.db.run('BEGIN IMMEDIATE');
+        try {
+            await this.db.run('UPDATE bank SET balance = balance - ? WHERE id = 1', [amount]);
+            await this.db.run(
+                `INSERT INTO users (jid, balance, pity_count, has_guaranteed)
+                 VALUES (?, ?, 0, 0)
+                 ON CONFLICT(jid) DO UPDATE SET balance = balance + ?`,
+                [userJid, amount, amount]
+            );
+            await this.db.run('COMMIT');
+        } catch (e) {
+            await this.db.run('ROLLBACK').catch(() => {});
+            throw e;
+        }
+    }
+
+    // --- HAREM ---
+
+    async getHarem(jid, groupId = 'global', sock) {
+        const userJid = await LidGuard.clean(sock, jid);
+        return await this.db.all(
+            `SELECT c.id, c.name, c.series, c.gender, c.value, cl.claimed_at
+             FROM claims cl
+             JOIN characters c ON cl.char_id = c.id
+             WHERE cl.owner_jid = ? AND cl.group_id = ?
+             ORDER BY cl.claimed_at DESC`,
+            [userJid, groupId]
+        );
+    }
+
+    // --- INTERCAMBIO ---
+
+    async trade(fromJid, toJid, charId, groupId = 'global', sock) {
+        const from = await LidGuard.clean(sock, fromJid);
+        const to   = await LidGuard.clean(sock, toJid);
+
+        const claim = await this.db.get(
+            'SELECT * FROM claims WHERE char_id = ? AND owner_jid = ? AND group_id = ?',
+            [charId, from, groupId]
+        );
+        if (!claim) throw new Error('CHARACTER_NOT_OWNED');
+
+        const alreadyOwned = await this.db.get(
+            'SELECT 1 FROM claims WHERE char_id = ? AND owner_jid = ? AND group_id = ?',
+            [charId, to, groupId]
+        );
+        if (alreadyOwned) throw new Error('ALREADY_CLAIMED');
+
+        await this.db.run('BEGIN IMMEDIATE');
+        try {
+            await this.db.run(
+                'UPDATE claims SET owner_jid = ? WHERE char_id = ? AND owner_jid = ? AND group_id = ?',
+                [to, charId, from, groupId]
+            );
+            await this.db.run('COMMIT');
+        } catch (e) {
+            await this.db.run('ROLLBACK').catch(() => {});
+            throw e;
+        }
+    }
+
+    // --- SERIES ---
+
+    async getSeriesCharacters(series) {
+        return await this.db.all(
+            `SELECT id, name, gender, value FROM characters
+             WHERE LOWER(series) = LOWER(?)
+             ORDER BY name ASC`,
+            [series]
+        );
+    }
+
     // --- MOTOR DE TIRADAS (GACHA ENGINE) ---
 
     async pull10(jid, type = 'banner', options = {}) {
         const { sock, groupId = 'global' } = options;
         const userJid = await LidGuard.clean(sock, jid);
 
-        // Asegurar que el usuario exista con todos los campos correctos
+        const HIT_RATE  = type === 'banner' ? HIT_RATE_BANNER : HIT_RATE_RW;
+        const PITY_LIMIT = type === 'banner' ? PITY_LIMIT_BANNER : PITY_LIMIT_RW;
+
         await this.db.run(
             `INSERT OR IGNORE INTO users (jid, balance, pity_count, has_guaranteed)
              VALUES (?, 0, 0, 0)`,
             [userJid]
         );
 
-        const user = await this.db.get("SELECT * FROM users WHERE jid = ?", [userJid]);
+        const user = await this.db.get('SELECT * FROM users WHERE jid = ?', [userJid]);
         if (!user || user.balance < PULL_COST) throw new Error('INSUFFICIENT_FUNDS');
 
         const isBannerMode = type === 'banner';
         const banner = isBannerMode
-            ? await this.db.get("SELECT * FROM active_banner WHERE id = 1")
+            ? await this.db.get('SELECT * FROM active_banner WHERE id = 1')
             : null;
 
         if (isBannerMode && !banner) throw new Error('NO_ACTIVE_BANNER');
 
         const results = [];
         let p = user.pity_count;
-        // Coerción explícita: SQLite devuelve 0/1 como número, forzamos booleano numérico
         let g = user.has_guaranteed ? 1 : 0;
+        let bankAccrued = 0;
 
-        await this.db.run("BEGIN IMMEDIATE");
+        await this.db.run('BEGIN IMMEDIATE');
         try {
             for (let i = 0; i < 10; i++) {
                 p++;
                 let char = null;
                 let isFeatured = false;
+                let isRepeat = false;
+                let repeatCompensation = 0;
 
                 const isHit = p >= PITY_LIMIT || Math.random() < HIT_RATE;
 
@@ -133,42 +234,61 @@ export class Kamijs {
                     isFeatured = true;
                     if (isBannerMode) {
                         if (g === 1 || p >= PITY_LIMIT || Math.random() > 0.5) {
-                            // Gana 50/50 o garantizado
                             char = await this.db.get(
-                                "SELECT * FROM characters WHERE id = ?",
+                                'SELECT * FROM characters WHERE id = ?',
                                 [banner.featured_id]
                             );
                             p = 0;
                             g = 0;
                         } else {
-                            // Pierde 50/50: personaje global excluyendo al featured
                             char = await this._getRandom('global', null, banner.featured_id);
                             g = 1;
                             p = 0;
                         }
                     } else {
-                        // Modo RW: cualquier personaje del pool global
                         char = await this._getRandom('global', null, null);
                         p = 0;
                     }
                 } else {
-                    // Tirada normal
                     const excludeId = isBannerMode ? banner.featured_id : null;
                     char = await this._getRandom(type, banner, excludeId);
                 }
 
-                if (!char) {
-                    // Pool vacío o serie sin personajes: abortar para no retornar resultados incompletos
-                    throw new Error('EMPTY_POOL');
-                }
+                if (!char) throw new Error('EMPTY_POOL');
 
-                await this.db.run(
-                    `INSERT OR IGNORE INTO claims (char_id, owner_jid, group_id, claimed_at)
-                     VALUES (?, ?, ?, ?)`,
-                    [char.id, userJid, groupId, Date.now()]
+                const existing = await this.db.get(
+                    'SELECT 1 FROM claims WHERE char_id = ? AND owner_jid = ? AND group_id = ?',
+                    [char.id, userJid, groupId]
                 );
 
-                results.push({ ...char, isFeatured });
+                if (existing) {
+                    isRepeat = true;
+                    if (type === 'global') {
+                        const charValue = char.value || 0;
+                        if (charValue > REPEAT_CAP) {
+                            repeatCompensation = REPEAT_CAP;
+                            bankAccrued += charValue - REPEAT_CAP;
+                        } else {
+                            repeatCompensation = charValue;
+                        }
+                        await this.db.run(
+                            'UPDATE users SET balance = balance + ? WHERE jid = ?',
+                            [repeatCompensation, userJid]
+                        );
+                    }
+                } else {
+                    await this.db.run(
+                        `INSERT OR IGNORE INTO claims (char_id, owner_jid, group_id, claimed_at)
+                         VALUES (?, ?, ?, ?)`,
+                        [char.id, userJid, groupId, Date.now()]
+                    );
+                }
+
+                results.push({ ...char, isFeatured, isRepeat, repeatCompensation });
+            }
+
+            if (bankAccrued > 0) {
+                await this.db.run('UPDATE bank SET balance = balance + ? WHERE id = 1', [bankAccrued]);
             }
 
             await this.db.run(
@@ -178,40 +298,30 @@ export class Kamijs {
                 [PULL_COST, p, g, userJid]
             );
 
-            await this.db.run("COMMIT");
+            await this.db.run('COMMIT');
             return results;
 
         } catch (e) {
-            try {
-                await this.db.run("ROLLBACK");
-            } catch (rollbackErr) {
-                console.warn('[Kamijs] ROLLBACK falló:', rollbackErr.message);
-            }
+            await this.db.run('ROLLBACK').catch(() => {});
             throw e;
         }
     }
 
-    /**
-     * Selector de personajes aleatorios.
-     * @param {string} type - 'banner' filtra por serie, 'global' usa todo el pool
-     * @param {object|null} banner - datos del banner activo
-     * @param {string|null} excludeId - ID a excluir del resultado
-     */
     async _getRandom(type, banner, excludeId) {
         const conditions = [];
         const params = [];
 
         if (type === 'banner' && banner?.series_target) {
-            conditions.push("series = ?");
+            conditions.push('series = ?');
             params.push(banner.series_target);
         }
 
         if (excludeId) {
-            conditions.push("id != ?");
+            conditions.push('id != ?');
             params.push(excludeId);
         }
 
-        const where = conditions.length > 0 ? " WHERE " + conditions.join(" AND ") : "";
+        const where = conditions.length > 0 ? ' WHERE ' + conditions.join(' AND ') : '';
         return await this.db.get(
             `SELECT * FROM characters${where} ORDER BY RANDOM() LIMIT 1`,
             params
