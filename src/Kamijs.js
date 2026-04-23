@@ -7,10 +7,10 @@ import { LidGuard } from './middleware/LidGuard.js';
 
 const PULL_COST       = 4000;
 
-const HIT_RATE_RW     = 0.015;
+const HIT_RATE_RW     = 0.02;
 const HIT_RATE_BANNER = 0.025;
 
-const PITY_LIMIT_RW     = 200;
+const PITY_LIMIT_RW     = 190;
 const PITY_LIMIT_BANNER = 160;
 
 const REPEAT_CAP      = 2000;
