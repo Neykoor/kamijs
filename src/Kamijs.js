@@ -7,11 +7,11 @@ import { LidGuard } from './middleware/LidGuard.js';
 
 const PULL_COST       = 4000;
 
-const HIT_RATE_RW     = 0.02;
-const HIT_RATE_BANNER = 0.025;
+const HIT_RATE_RW     = 0.03;
+const HIT_RATE_BANNER = 0.03;
 
-const PITY_LIMIT_RW     = 190;
-const PITY_LIMIT_BANNER = 160;
+const PITY_LIMIT_RW     = 150;
+const PITY_LIMIT_BANNER = 150;
 
 const REPEAT_CAP      = 2000;
 
@@ -218,20 +218,26 @@ export class Kamijs {
         let p = user.pity_count;
         let g = user.has_guaranteed ? 1 : 0;
         let bankAccrued = 0;
+        let hitOccurred = false;
+
+        p += 10;
+        const forcedHit = p >= PITY_LIMIT;
 
         await this.db.run('BEGIN IMMEDIATE');
         try {
             for (let i = 0; i < 10; i++) {
-                p++;
                 let char = null;
                 let isFeatured = false;
                 let isRepeat = false;
                 let repeatCompensation = 0;
 
-                const isHit = p >= PITY_LIMIT || Math.random() < HIT_RATE;
+                const isLastPull = i === 9;
+                const isHit = (!hitOccurred && isLastPull && forcedHit)
+                    || Math.random() < HIT_RATE;
 
                 if (isHit) {
                     isFeatured = true;
+                    hitOccurred = true;
                     if (isBannerMode) {
                         if (g === 1 || p >= PITY_LIMIT || Math.random() > 0.5) {
                             char = await this.db.get(
