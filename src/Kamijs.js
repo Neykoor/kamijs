@@ -7,8 +7,8 @@ import { LidGuard } from './middleware/LidGuard.js';
 
 const PULL_COST       = 4000;
 
-const HIT_RATE_RW     = 0.03;
-const HIT_RATE_BANNER = 0.03;
+const HIT_RATE_RW     = 0.025;
+const HIT_RATE_BANNER = 0.025;
 
 const PITY_LIMIT_RW     = 150;
 const PITY_LIMIT_BANNER = 150;
@@ -52,7 +52,8 @@ export class Kamijs {
                 jid TEXT PRIMARY KEY,
                 balance INTEGER DEFAULT 0,
                 pity_count INTEGER DEFAULT 0,
-                has_guaranteed INTEGER DEFAULT 0
+                has_guaranteed INTEGER DEFAULT 0,
+                luck REAL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS claims (
@@ -78,6 +79,7 @@ export class Kamijs {
         `);
 
         await this.db.run(`UPDATE characters SET value = 3000 WHERE value IS NULL`);
+        await this.db.run(`ALTER TABLE users ADD COLUMN luck REAL DEFAULT 0`).catch(() => {});
     }
 
     // --- MÉTODOS ADMINISTRATIVOS ---
@@ -300,29 +302,44 @@ export class Kamijs {
         const results = [];
         let p = user.pity_count;
         let g = user.has_guaranteed ? 1 : 0;
+        let luck = user.luck ?? 0;
         let bankAccrued = 0;
         let hitOccurred = false;
-
-        p += 10;
-        const forcedHit = p >= PITY_LIMIT;
 
         await this.db.run('BEGIN IMMEDIATE');
         try {
             for (let i = 0; i < 10; i++) {
+                p++;
                 let char = null;
                 let isFeatured = false;
                 let isRepeat = false;
                 let repeatCompensation = 0;
+                let jackpotBonus = 0;
 
                 const isLastPull = i === 9;
-                const isHit = (!hitOccurred && isLastPull && forcedHit)
-                    || Math.random() < HIT_RATE;
+                const pityHit = p >= PITY_LIMIT;
+                const multiGuarantee = isLastPull && !hitOccurred;
+
+                const softRate =
+                    p >= 110 ? 0.08 :
+                    p >= 90  ? 0.05 :
+                    p >= 70  ? 0.04 :
+                    HIT_RATE;
+                const effectiveRate = Math.min(softRate + luck, 1);
+
+                const isHit =
+                    (pityHit && !hitOccurred) ||
+                    multiGuarantee ||
+                    Math.random() < effectiveRate;
 
                 if (isHit) {
-                    isFeatured = true;
                     hitOccurred = true;
+                    luck = 0;
+
                     if (isBannerMode) {
-                        if (g === 1 || p >= PITY_LIMIT || Math.random() > 0.5) {
+                        const win50 = Math.random() < 0.5;
+                        if (g === 1 || pityHit || win50) {
+                            isFeatured = true;
                             char = await this.db.get(
                                 'SELECT * FROM characters WHERE id = ?',
                                 [banner.featured_id]
@@ -339,7 +356,21 @@ export class Kamijs {
                         char = await this._getRandom('global', null, null);
                         p = 0;
                     }
+
+                    if (Math.random() < 0.01) {
+                        const bankBalance = await this.getBank();
+                        if (bankBalance > 0) {
+                            const maxJackpot = 20000;
+                            jackpotBonus = Math.min(Math.floor(bankBalance * 0.05), maxJackpot);
+                            bankAccrued -= jackpotBonus;
+                            await this.db.run(
+                                'UPDATE users SET balance = balance + ? WHERE jid = ?',
+                                [jackpotBonus, userJid]
+                            );
+                        }
+                    }
                 } else {
+                    luck = Math.min(luck + 0.001, 0.02);
                     const excludeId = isBannerMode ? banner.featured_id : null;
                     char = await this._getRandom(type, banner, excludeId);
                 }
@@ -354,19 +385,13 @@ export class Kamijs {
 
                     if (existing) {
                         isRepeat = true;
-                        if (type === 'global') {
-                            const charValue = char.value || 0;
-                            if (charValue > REPEAT_CAP) {
-                                repeatCompensation = REPEAT_CAP;
-                                bankAccrued += charValue - REPEAT_CAP;
-                            } else {
-                                repeatCompensation = charValue;
-                            }
-                            await this.db.run(
-                                'UPDATE users SET balance = balance + ? WHERE jid = ?',
-                                [repeatCompensation, userJid]
-                            );
-                        }
+                        const charValue = char.value || 0;
+                        repeatCompensation = Math.floor(charValue * 0.30);
+                        bankAccrued += charValue - repeatCompensation;
+                        await this.db.run(
+                            'UPDATE users SET balance = balance + ? WHERE jid = ?',
+                            [repeatCompensation, userJid]
+                        );
                     } else {
                         await this.db.run(
                             `INSERT OR IGNORE INTO claims (char_id, owner_jid, group_id, claimed_at)
@@ -376,18 +401,20 @@ export class Kamijs {
                     }
                 }
 
-                results.push({ ...char, isFeatured, isRepeat, repeatCompensation });
+                results.push({ ...char, isFeatured, isRepeat, repeatCompensation, jackpotBonus, pity: p, luck: parseFloat(luck.toFixed(4)) });
             }
 
             if (bankAccrued > 0) {
                 await this.db.run('UPDATE bank SET balance = balance + ? WHERE id = 1', [bankAccrued]);
+            } else if (bankAccrued < 0) {
+                await this.db.run('UPDATE bank SET balance = MAX(0, balance + ?) WHERE id = 1', [bankAccrued]);
             }
 
             await this.db.run(
                 `UPDATE users
-                 SET balance = balance - ?, pity_count = ?, has_guaranteed = ?
+                 SET balance = balance - ?, pity_count = ?, has_guaranteed = ?, luck = ?
                  WHERE jid = ?`,
-                [PULL_COST, p, g, userJid]
+                [PULL_COST, p, g, luck, userJid]
             );
 
             await this.db.run('COMMIT');
