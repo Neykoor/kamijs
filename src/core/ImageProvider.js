@@ -5,12 +5,16 @@ export class ImageProvider {
         const timeout = setTimeout(() => controller.abort(), 8000);
         try {
             const cleanTag = tag.replace(/\s+/g, '_').toLowerCase();
-            const url = `https://yande.re/post.json?tags=${encodeURIComponent(cleanTag)}+-rating:e&limit=100`;
+            // Danbooru: rating:g = general (safe), s = sensitive — excluimos explicit y questionable
+            const url = `https://danbooru.donmai.us/posts.json?tags=${encodeURIComponent(cleanTag)}+rating:g,s&limit=100&random=true`;
             const res = await fetch(url, {
                 signal: controller.signal,
                 headers: { 'User-Agent': 'Mozilla/5.0' }
             });
-            return res.ok ? await res.json() : null;
+            if (!res.ok) return null;
+            const posts = await res.json();
+            // Danbooru devuelve array directo
+            return Array.isArray(posts) && posts.length ? posts : null;
         } finally {
             clearTimeout(timeout);
         }
@@ -20,16 +24,19 @@ export class ImageProvider {
         try {
             if (!tag || typeof tag !== 'string') return null;
             const cleanTag = tag.replace(/\s+/g, '_').toLowerCase();
-            let data = await this.#fetchPosts(cleanTag);
+            let posts = await this.#fetchPosts(cleanTag);
 
-            if (!data || !data.length) {
+            // Fallback: intentar solo el nombre sin el sufijo de serie
+            if (!posts || !posts.length) {
                 const simpleTag = cleanTag.split('_(')[0];
-                if (simpleTag !== cleanTag) data = await this.#fetchPosts(simpleTag);
+                if (simpleTag !== cleanTag) posts = await this.#fetchPosts(simpleTag);
             }
 
-            if (!data || !data.length) return null;
-            const post = data[Math.floor(Math.random() * data.length)];
-            return post.file_url || post.sample_url || post.jpeg_url || null;
+            if (!posts || !posts.length) return null;
+
+            const post = posts[Math.floor(Math.random() * posts.length)];
+            // Danbooru usa large_file_url > url > preview_file_url
+            return post.large_file_url || post.file_url || post.preview_file_url || null;
         } catch { return null; }
     }
 }
