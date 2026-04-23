@@ -262,32 +262,34 @@ export class Kamijs {
 
                 if (!char) throw new Error('EMPTY_POOL');
 
-                const existing = await this.db.get(
-                    'SELECT 1 FROM claims WHERE char_id = ? AND owner_jid = ? AND group_id = ?',
-                    [char.id, userJid, groupId]
-                );
+                if (isHit) {
+                    const existing = await this.db.get(
+                        'SELECT 1 FROM claims WHERE char_id = ? AND owner_jid = ? AND group_id = ?',
+                        [char.id, userJid, groupId]
+                    );
 
-                if (existing) {
-                    isRepeat = true;
-                    if (type === 'global') {
-                        const charValue = char.value || 0;
-                        if (charValue > REPEAT_CAP) {
-                            repeatCompensation = REPEAT_CAP;
-                            bankAccrued += charValue - REPEAT_CAP;
-                        } else {
-                            repeatCompensation = charValue;
+                    if (existing) {
+                        isRepeat = true;
+                        if (type === 'global') {
+                            const charValue = char.value || 0;
+                            if (charValue > REPEAT_CAP) {
+                                repeatCompensation = REPEAT_CAP;
+                                bankAccrued += charValue - REPEAT_CAP;
+                            } else {
+                                repeatCompensation = charValue;
+                            }
+                            await this.db.run(
+                                'UPDATE users SET balance = balance + ? WHERE jid = ?',
+                                [repeatCompensation, userJid]
+                            );
                         }
+                    } else {
                         await this.db.run(
-                            'UPDATE users SET balance = balance + ? WHERE jid = ?',
-                            [repeatCompensation, userJid]
+                            `INSERT OR IGNORE INTO claims (char_id, owner_jid, group_id, claimed_at)
+                             VALUES (?, ?, ?, ?)`,
+                            [char.id, userJid, groupId, Date.now()]
                         );
                     }
-                } else {
-                    await this.db.run(
-                        `INSERT OR IGNORE INTO claims (char_id, owner_jid, group_id, claimed_at)
-                         VALUES (?, ?, ?, ?)`,
-                        [char.id, userJid, groupId, Date.now()]
-                    );
                 }
 
                 results.push({ ...char, isFeatured, isRepeat, repeatCompensation });
