@@ -54,8 +54,6 @@ export class Kamijs {
         `);
     }
 
-    // --- MÉTODOS ADMINISTRATIVOS ---
-
     async addCharacter(data) {
         const charId = data.id || crypto.randomBytes(4).toString('hex');
         await this.db.run(
@@ -82,8 +80,6 @@ export class Kamijs {
         );
     }
 
-    // --- MOTOR DE TIRADAS ---
-
     async pull10(jid, type = 'banner', options = {}) {
         const { sock, groupId = 'global' } = options;
         const userJid = await LidGuard.clean(sock, jid);
@@ -91,9 +87,12 @@ export class Kamijs {
         await this.db.run("INSERT OR IGNORE INTO users (jid, balance) VALUES (?, 0)", [userJid]);
         const user = await this.db.get("SELECT * FROM users WHERE jid = ?", [userJid]);
         
-        if (user.balance < 4000) throw new Error('INSUFFICIENT_FUNDS');
+        if (!user || user.balance < 4000) throw new Error('INSUFFICIENT_FUNDS');
 
+        // Intentamos obtener el banner, pero no bloqueamos el proceso todavía
         const banner = await this.db.get("SELECT * FROM active_banner WHERE id = 1");
+        
+        // Solo lanzamos error si el usuario pide 'banner' y no hay uno configurado
         if (!banner && type === 'banner') throw new Error('NO_ACTIVE_BANNER');
 
         let results = [];
@@ -109,26 +108,25 @@ export class Kamijs {
 
                 // Lógica de Suerte (3%) o Pity (160)
                 if (p >= 160 || Math.random() < 0.03) {
-                    if (type === 'banner') {
+                    isFeatured = true;
+                    if (type === 'banner' && banner) {
                         // MODO BANNER: 50/50 contra el destacado del mes
                         if (g === 1 || p >= 160 || Math.random() > 0.5) {
                             char = await this.db.get("SELECT * FROM characters WHERE id = ?", [banner.featured_id]);
-                            isFeatured = true;
                             p = 0; g = 0;
                         } else {
-                            // Perdió 50/50: Saca cualquier otro personaje y activa garantizado
-                            char = await this._getRandom('global', banner, true);
+                            // Perdió 50/50: Saca cualquier otro personaje global (RW) y activa garantizado
+                            char = await this._getRandom('global', null, true, banner?.featured_id);
                             g = 1; p = 0;
-                            isFeatured = true; // Sigue siendo un "Hit" (✔️) aunque no sea el principal
                         }
                     } else {
-                        // MODO RW: Cualquier personaje puede ser un "Hit" (✔️)
-                        char = await this._getRandom('global', banner, false);
-                        isFeatured = true;
-                        p = 0; 
+                        // MODO RW (GLOBAL): Cualquier personaje es un acierto (✔️)
+                        char = await this._getRandom('global', null, false);
+                        p = 0;
                     }
                 } else {
                     // Tirada Normal (❌)
+                    // Si es 'banner' saca de la serie focus, si es 'global' saca de todo.
                     char = await this._getRandom(type, banner, false);
                 }
 
@@ -155,22 +153,28 @@ export class Kamijs {
     }
 
     /**
-     * Selector aleatorio inteligente
+     * Selector aleatorio inteligente.
+     * @param {string} type - 'banner' o 'global'
+     * @param {object} banner - Objeto del banner activo
+     * @param {boolean} excludeFeatured - Si se debe ignorar al personaje promocionado
+     * @param {string} forcedExcludeId - ID manual para excluir (usado en el 50/50 fallido)
      */
-    async _getRandom(type, banner, excludeFeatured) {
+    async _getRandom(type, banner, excludeFeatured, forcedExcludeId = null) {
         let sql = "SELECT * FROM characters";
         let params = [];
         let conditions = [];
 
-        if (type === 'banner' && banner) {
-            // Solo personajes de la serie del banner
+        // Filtro de Serie: Solo aplica en modo 'banner'
+        if (type === 'banner' && banner?.series_target) {
             conditions.push("series = ?");
             params.push(banner.series_target);
         }
 
-        if (excludeFeatured && banner?.featured_id) {
+        // Exclusión del personaje destacado (para que no salga en tiradas normales o 50/50 fallidos)
+        const idToExclude = forcedExcludeId || banner?.featured_id;
+        if (excludeFeatured && idToExclude) {
             conditions.push("id != ?");
-            params.push(banner.featured_id);
+            params.push(idToExclude);
         }
 
         if (conditions.length > 0) {
