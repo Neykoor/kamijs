@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import sqlite3 from 'sqlite3';
 import { open } from 'sqlite';
+import crypto from 'crypto';
 import { LidGuard } from './middleware/LidGuard.js';
 
 export class Kamijs {
@@ -20,6 +21,7 @@ export class Kamijs {
             PRAGMA busy_timeout = 5000;
             PRAGMA journal_mode = WAL;
 
+            -- 1. Tabla de Personajes (Aquí viven todos los datos de la ficha)
             CREATE TABLE IF NOT EXISTS characters (
                 id TEXT PRIMARY KEY, 
                 name TEXT, 
@@ -29,6 +31,7 @@ export class Kamijs {
                 value INTEGER DEFAULT 3000
             );
 
+            -- 2. Banner Activo
             CREATE TABLE IF NOT EXISTS active_banner (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 title TEXT,
@@ -36,20 +39,47 @@ export class Kamijs {
                 featured_id TEXT
             );
 
+            -- 3. Usuarios y Economía
             CREATE TABLE IF NOT EXISTS users (
                 jid TEXT PRIMARY KEY,
                 balance INTEGER DEFAULT 0,
                 pity_count INTEGER DEFAULT 0,
                 has_guaranteed INTEGER DEFAULT 0
             );
-
-            CREATE TABLE IF NOT EXISTS claims (
-                char_id TEXT,
-                owner_jid TEXT,
-                group_id TEXT,
-                PRIMARY KEY (char_id, group_id)
-            );
         `);
+    }
+
+    /**
+     * Añadir personaje asegurando que todos los campos de la ficha técnica existan.
+     */
+    async addCharacter(data) {
+        const charId = data.id || crypto.randomBytes(4).toString('hex');
+        await this.db.run(
+            `INSERT INTO characters (id, name, series, gender, booru_tag, value) 
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [
+                charId, 
+                data.name, 
+                data.series, 
+                data.gender, 
+                data.booru_tag || data.name, 
+                data.value || 3000
+            ]
+        );
+        return charId;
+    }
+
+    /**
+     * Sistema de Depósito con validación de seguridad.
+     */
+    async deposit(jid, amount, sock) {
+        if (!Number.isInteger(amount) || amount <= 0) throw new Error('INVALID_AMOUNT');
+        const userJid = await LidGuard.clean(sock, jid);
+        await this.db.run(
+            `INSERT INTO users (jid, balance) VALUES (?, ?) 
+             ON CONFLICT(jid) DO UPDATE SET balance = balance + ?`,
+            [userJid, amount, amount]
+        );
     }
 
     async setBanner(title, series, featuredId) {
@@ -61,6 +91,10 @@ export class Kamijs {
         );
     }
 
+    /**
+     * El motor de 10 tiradas. 
+     * Devuelve objetos completos con ID, Nombre, Serie, Género y Valor.
+     */
     async pull10(jid, type = 'banner', sock) {
         const userJid = await LidGuard.clean(sock, jid);
         
@@ -81,9 +115,8 @@ export class Kamijs {
             let char;
             let isFeatured = false;
 
-            // Lógica de Suerte: 3% de probabilidad o Pity de 160
+            // Lógica de Suerte: 3% o Pity de 160
             if (p >= 160 || Math.random() < 0.03) {
-                // Sistema 50/50
                 if (g === 1 || p >= 160 || Math.random() > 0.5) {
                     char = await this.db.get("SELECT * FROM characters WHERE id = ?", [banner.featured_id]);
                     isFeatured = true;
@@ -95,29 +128,38 @@ export class Kamijs {
             } else {
                 char = await this._getRandom(type, banner, false);
             }
-            results.push({ ...char, isFeatured });
+            
+            if (char) results.push({ ...char, isFeatured });
         }
 
-        // Guardado atómico
+        // Actualización atómica de la cuenta del usuario
         await this.db.run(
-            "UPDATE users SET balance = balance - 4000, pity_count = ?, has_guaranteed = ? WHERE jid = ?",
+            `UPDATE users SET balance = balance - 4000, pity_count = ?, has_guaranteed = ? WHERE jid = ?`,
             [p, g, userJid]
         );
 
         return results;
     }
 
+    /**
+     * Selector aleatorio con SELECT * para no olvidar ningún dato.
+     */
     async _getRandom(type, banner, excludeFeatured) {
         let sql = "SELECT * FROM characters";
         let params = [];
+        
         if (type === 'banner') {
             sql += " WHERE series = ?";
             params.push(banner.series_target);
-            if (excludeFeatured) { sql += " AND id != ?"; params.push(banner.featured_id); }
+            if (excludeFeatured) { 
+                sql += " AND id != ?"; 
+                params.push(banner.featured_id); 
+            }
         } else if (excludeFeatured) {
             sql += " WHERE id != ?";
             params.push(banner.featured_id);
         }
-        return await this.db.get(sql + " ORDER BY RANDOM() LIMIT 1", params);
+        
+        return await this.db.get(`${sql} ORDER BY RANDOM() LIMIT 1`, params);
     }
 }
