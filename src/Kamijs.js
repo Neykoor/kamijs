@@ -5,6 +5,10 @@ import { open } from 'sqlite';
 import crypto from 'crypto';
 import { LidGuard } from './middleware/LidGuard.js';
 
+const PULL_COST = 4000;
+const PITY_LIMIT = 160;
+const HIT_RATE = 0.03;
+
 export class Kamijs {
     constructor(config = {}) {
         this.dbPath = config.dbPath || './database/gacha.db';
@@ -16,16 +20,16 @@ export class Kamijs {
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
         this.db = await open({ filename: this.dbPath, driver: sqlite3.Database });
-        
+
         await this.db.exec(`
             PRAGMA busy_timeout = 5000;
             PRAGMA journal_mode = WAL;
 
             CREATE TABLE IF NOT EXISTS characters (
-                id TEXT PRIMARY KEY, 
-                name TEXT, 
-                series TEXT, 
-                gender TEXT, 
+                id TEXT PRIMARY KEY,
+                name TEXT,
+                series TEXT,
+                gender TEXT,
                 booru_tag TEXT,
                 value INTEGER DEFAULT 3000
             );
@@ -54,10 +58,13 @@ export class Kamijs {
         `);
     }
 
+    // --- MÉTODOS ADMINISTRATIVOS ---
+
     async addCharacter(data) {
         const charId = data.id || crypto.randomBytes(4).toString('hex');
         await this.db.run(
-            `INSERT INTO characters (id, name, series, gender, booru_tag, value) VALUES (?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO characters (id, name, series, gender, booru_tag, value)
+             VALUES (?, ?, ?, ?, ?, ?)`,
             [charId, data.name, data.series, data.gender, data.booru_tag || data.name, data.value || 3000]
         );
         return charId;
@@ -65,9 +72,12 @@ export class Kamijs {
 
     async setBanner(title, series, featuredId) {
         await this.db.run(
-            `INSERT INTO active_banner (id, title, series_target, featured_id) 
-             VALUES (1, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET 
-             title=excluded.title, series_target=excluded.series_target, featured_id=excluded.featured_id`,
+            `INSERT INTO active_banner (id, title, series_target, featured_id)
+             VALUES (1, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+             title = excluded.title,
+             series_target = excluded.series_target,
+             featured_id = excluded.featured_id`,
             [title, series, featuredId]
         );
     }
@@ -75,112 +85,136 @@ export class Kamijs {
     async deposit(jid, amount, sock) {
         const userJid = await LidGuard.clean(sock, jid);
         await this.db.run(
-            `INSERT INTO users (jid, balance) VALUES (?, ?) ON CONFLICT(jid) DO UPDATE SET balance = balance + ?`,
+            `INSERT INTO users (jid, balance, pity_count, has_guaranteed)
+             VALUES (?, ?, 0, 0)
+             ON CONFLICT(jid) DO UPDATE SET balance = balance + ?`,
             [userJid, amount, amount]
         );
     }
 
+    // --- MOTOR DE TIRADAS (GACHA ENGINE) ---
+
     async pull10(jid, type = 'banner', options = {}) {
         const { sock, groupId = 'global' } = options;
         const userJid = await LidGuard.clean(sock, jid);
-        
-        await this.db.run("INSERT OR IGNORE INTO users (jid, balance) VALUES (?, 0)", [userJid]);
+
+        // Asegurar que el usuario exista con todos los campos correctos
+        await this.db.run(
+            `INSERT OR IGNORE INTO users (jid, balance, pity_count, has_guaranteed)
+             VALUES (?, 0, 0, 0)`,
+            [userJid]
+        );
+
         const user = await this.db.get("SELECT * FROM users WHERE jid = ?", [userJid]);
-        
-        if (!user || user.balance < 4000) throw new Error('INSUFFICIENT_FUNDS');
+        if (!user || user.balance < PULL_COST) throw new Error('INSUFFICIENT_FUNDS');
 
-        // Intentamos obtener el banner, pero no bloqueamos el proceso todavía
-        const banner = await this.db.get("SELECT * FROM active_banner WHERE id = 1");
-        
-        // Solo lanzamos error si el usuario pide 'banner' y no hay uno configurado
-        if (!banner && type === 'banner') throw new Error('NO_ACTIVE_BANNER');
+        const isBannerMode = type === 'banner';
+        const banner = isBannerMode
+            ? await this.db.get("SELECT * FROM active_banner WHERE id = 1")
+            : null;
 
-        let results = [];
+        if (isBannerMode && !banner) throw new Error('NO_ACTIVE_BANNER');
+
+        const results = [];
         let p = user.pity_count;
-        let g = user.has_guaranteed;
+        // Coerción explícita: SQLite devuelve 0/1 como número, forzamos booleano numérico
+        let g = user.has_guaranteed ? 1 : 0;
 
         await this.db.run("BEGIN IMMEDIATE");
         try {
             for (let i = 0; i < 10; i++) {
                 p++;
-                let char;
+                let char = null;
                 let isFeatured = false;
 
-                // Lógica de Suerte (3%) o Pity (160)
-                if (p >= 160 || Math.random() < 0.03) {
+                const isHit = p >= PITY_LIMIT || Math.random() < HIT_RATE;
+
+                if (isHit) {
                     isFeatured = true;
-                    if (type === 'banner' && banner) {
-                        // MODO BANNER: 50/50 contra el destacado del mes
-                        if (g === 1 || p >= 160 || Math.random() > 0.5) {
-                            char = await this.db.get("SELECT * FROM characters WHERE id = ?", [banner.featured_id]);
-                            p = 0; g = 0;
+                    if (isBannerMode) {
+                        if (g === 1 || p >= PITY_LIMIT || Math.random() > 0.5) {
+                            // Gana 50/50 o garantizado
+                            char = await this.db.get(
+                                "SELECT * FROM characters WHERE id = ?",
+                                [banner.featured_id]
+                            );
+                            p = 0;
+                            g = 0;
                         } else {
-                            // Perdió 50/50: Saca cualquier otro personaje global (RW) y activa garantizado
-                            char = await this._getRandom('global', null, true, banner?.featured_id);
-                            g = 1; p = 0;
+                            // Pierde 50/50: personaje global excluyendo al featured
+                            char = await this._getRandom('global', null, banner.featured_id);
+                            g = 1;
+                            p = 0;
                         }
                     } else {
-                        // MODO RW (GLOBAL): Cualquier personaje es un acierto (✔️)
-                        char = await this._getRandom('global', null, false);
+                        // Modo RW: cualquier personaje del pool global
+                        char = await this._getRandom('global', null, null);
                         p = 0;
                     }
                 } else {
-                    // Tirada Normal (❌)
-                    // Si es 'banner' saca de la serie focus, si es 'global' saca de todo.
-                    char = await this._getRandom(type, banner, false);
+                    // Tirada normal
+                    const excludeId = isBannerMode ? banner.featured_id : null;
+                    char = await this._getRandom(type, banner, excludeId);
                 }
 
-                if (char) {
-                    await this.db.run(
-                        `INSERT OR IGNORE INTO claims (char_id, owner_jid, group_id, claimed_at) VALUES (?, ?, ?, ?)`,
-                        [char.id, userJid, groupId, Date.now()]
-                    );
-                    results.push({ ...char, isFeatured });
+                if (!char) {
+                    // Pool vacío o serie sin personajes: abortar para no retornar resultados incompletos
+                    throw new Error('EMPTY_POOL');
                 }
+
+                await this.db.run(
+                    `INSERT OR IGNORE INTO claims (char_id, owner_jid, group_id, claimed_at)
+                     VALUES (?, ?, ?, ?)`,
+                    [char.id, userJid, groupId, Date.now()]
+                );
+
+                results.push({ ...char, isFeatured });
             }
 
             await this.db.run(
-                "UPDATE users SET balance = balance - 4000, pity_count = ?, has_guaranteed = ? WHERE jid = ?",
-                [p, g, userJid]
+                `UPDATE users
+                 SET balance = balance - ?, pity_count = ?, has_guaranteed = ?
+                 WHERE jid = ?`,
+                [PULL_COST, p, g, userJid]
             );
 
             await this.db.run("COMMIT");
             return results;
+
         } catch (e) {
-            await this.db.run("ROLLBACK");
+            try {
+                await this.db.run("ROLLBACK");
+            } catch (rollbackErr) {
+                console.warn('[Kamijs] ROLLBACK falló:', rollbackErr.message);
+            }
             throw e;
         }
     }
 
     /**
-     * Selector aleatorio inteligente.
-     * @param {string} type - 'banner' o 'global'
-     * @param {object} banner - Objeto del banner activo
-     * @param {boolean} excludeFeatured - Si se debe ignorar al personaje promocionado
-     * @param {string} forcedExcludeId - ID manual para excluir (usado en el 50/50 fallido)
+     * Selector de personajes aleatorios.
+     * @param {string} type - 'banner' filtra por serie, 'global' usa todo el pool
+     * @param {object|null} banner - datos del banner activo
+     * @param {string|null} excludeId - ID a excluir del resultado
      */
-    async _getRandom(type, banner, excludeFeatured, forcedExcludeId = null) {
-        let sql = "SELECT * FROM characters";
-        let params = [];
-        let conditions = [];
+    async _getRandom(type, banner, excludeId) {
+        const conditions = [];
+        const params = [];
 
-        // Filtro de Serie: Solo aplica en modo 'banner'
         if (type === 'banner' && banner?.series_target) {
             conditions.push("series = ?");
             params.push(banner.series_target);
         }
 
-        // Exclusión del personaje destacado (para que no salga en tiradas normales o 50/50 fallidos)
-        const idToExclude = forcedExcludeId || banner?.featured_id;
-        if (excludeFeatured && idToExclude) {
+        if (excludeId) {
             conditions.push("id != ?");
-            params.push(idToExclude);
+            params.push(excludeId);
         }
 
-        if (conditions.length > 0) {
-            sql += " WHERE " + conditions.join(" AND ");
-        }
-
-        return await this.db.get(sql + " ORDER BY RANDOM() LIMIT 1", params);
+        const where = conditions.length > 0 ? " WHERE " + conditions.join(" AND ") : "";
+        return await this.db.get(
+            `SELECT * FROM characters${where} ORDER BY RANDOM() LIMIT 1`,
+            params
+        );
     }
 }
