@@ -70,6 +70,8 @@ export class Kamijs {
 
             INSERT OR IGNORE INTO bank (id, balance) VALUES (1, 0);
         `);
+
+        await this.db.run(`UPDATE characters SET value = 3000 WHERE value IS NULL`);
     }
 
     // --- MÉTODOS ADMINISTRATIVOS ---
@@ -88,6 +90,13 @@ export class Kamijs {
             [charId, data.name, data.series, data.gender, data.booru_tag || data.name, data.value || 3000]
         );
         return charId;
+    }
+
+    async getRandomCharacterBySeries(series) {
+        return await this.db.get(
+            `SELECT * FROM characters WHERE LOWER(series) = LOWER(?) ORDER BY RANDOM() LIMIT 1`,
+            [series]
+        );
     }
 
     async getCharacter(id) {
