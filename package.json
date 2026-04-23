@@ -1,0 +1,15 @@
+{
+  "name": "kamijs",
+  "version": "5.0.0",
+  "type": "module",
+  "main": "src/index.js",
+  "dependencies": {
+    "sqlite": "^5.1.1",
+    "sqlite3": "^5.1.7",
+    "lidsync": "git+https://github.com/Neykoor/LidSync.git"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "ISC"
+}
