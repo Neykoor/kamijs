@@ -44,7 +44,8 @@ export class Kamijs {
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 title TEXT,
                 series_target TEXT,
-                featured_id TEXT
+                featured_id TEXT,
+                expires_at INTEGER
             );
 
             CREATE TABLE IF NOT EXISTS users (
@@ -93,16 +94,46 @@ export class Kamijs {
         return await this.db.get('SELECT * FROM characters WHERE id = ?', [id]);
     }
 
-    async setBanner(title, series, featuredId) {
+    async setBanner(title, series, featuredId, durationDays = 20) {
+        const expiresAt = Date.now() + durationDays * 24 * 60 * 60 * 1000;
         await this.db.run(
-            `INSERT INTO active_banner (id, title, series_target, featured_id)
-             VALUES (1, ?, ?, ?)
+            `INSERT INTO active_banner (id, title, series_target, featured_id, expires_at)
+             VALUES (1, ?, ?, ?, ?)
              ON CONFLICT(id) DO UPDATE SET
              title = excluded.title,
              series_target = excluded.series_target,
-             featured_id = excluded.featured_id`,
-            [title, series, featuredId]
+             featured_id = excluded.featured_id,
+             expires_at = excluded.expires_at`,
+            [title, series, featuredId, expiresAt]
         );
+        return expiresAt;
+    }
+
+    async getActiveBanner() {
+        return await this.db.get('SELECT * FROM active_banner WHERE id = 1');
+    }
+
+    async checkAndRotateBanner() {
+        const banner = await this.getActiveBanner();
+        const now = Date.now();
+
+        if (banner && banner.expires_at > now) return null;
+
+        const randomSeries = await this.db.get(
+            `SELECT series FROM characters GROUP BY series ORDER BY RANDOM() LIMIT 1`
+        );
+        if (!randomSeries) return null;
+
+        const featured = await this.db.get(
+            `SELECT * FROM characters WHERE series = ? ORDER BY RANDOM() LIMIT 1`,
+            [randomSeries.series]
+        );
+        if (!featured) return null;
+
+        const title = `✨ Banner de ${randomSeries.series}`;
+        const expiresAt = await this.setBanner(title, randomSeries.series, featured.id);
+
+        return { title, series: randomSeries.series, featured, expiresAt };
     }
 
     async deposit(jid, amount, sock) {
@@ -345,4 +376,4 @@ export class Kamijs {
             params
         );
     }
-                }
+}
