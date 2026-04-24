@@ -380,19 +380,18 @@ export class Kamijs {
                 if (!char) throw new Error('EMPTY_POOL');
 
                 if (isHit) {
-                    // FIX: verificar si el personaje ya existe en este grupo (cualquier dueño)
-                    // porque la PK de claims es (char_id, group_id), no incluye owner_jid.
-                    // Si solo verificamos por owner_jid, otro usuario puede ya tenerlo y
-                    // el INSERT lanzaría SQLITE_CONSTRAINT: UNIQUE constraint failed.
-                    const existingInDb = await this.db.get(
-                        'SELECT 1 FROM claims WHERE char_id = ? AND group_id = ?',
+                    // La PK de claims es (char_id, group_id) — un personaje solo puede
+                    // pertenecer a UN usuario por grupo. Verificar quién ya lo tiene.
+                    const existingClaim = await this.db.get(
+                        'SELECT owner_jid FROM claims WHERE char_id = ? AND group_id = ?',
                         [char.id, groupId]
                     );
-                    // También es repetido si ya salió en esta misma tirada
                     const existingInSession = pulledThisSession.has(char.id);
 
-                    if (existingInDb || existingInSession) {
+                    if (existingClaim || existingInSession) {
                         isRepeat = true;
+                        // Guardar quién tiene el personaje (null si fue en esta misma tirada)
+                        char.currentOwnerJid = existingClaim?.owner_jid || null;
                         const charValue = char.value || 0;
                         repeatCompensation = Math.floor(charValue * 0.30);
                         bankAccrued += charValue - repeatCompensation;
@@ -462,4 +461,4 @@ export class Kamijs {
             params
         );
     }
-    }
+}
