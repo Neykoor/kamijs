@@ -1,8 +1,9 @@
 {
-  "name": "kamijs",
+   "name": "kamijs",
   "version": "5.0.0",
   "type": "module",
   "main": "src/index.js",
+  "exports": "./src/index.js",
   "dependencies": {
     "sqlite": "^5.1.1",
     "sqlite3": "^5.1.7",
