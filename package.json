@@ -1,5 +1,5 @@
 {
-   "name": "kamijs",
+  "name": "kamijs",
   "version": "5.0.0",
   "type": "module",
   "main": "src/index.js",
@@ -7,7 +7,7 @@
   "dependencies": {
     "sqlite": "^5.1.1",
     "sqlite3": "^5.1.7",
-    "lidsync": "git+https://github.com/Neykoor/LidSync.git"
+    "lidsync": "^5.0.3"
   },
   "engines": {
     "node": ">=18.0.0"
