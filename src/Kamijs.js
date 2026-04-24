@@ -380,9 +380,13 @@ export class Kamijs {
                 if (!char) throw new Error('EMPTY_POOL');
 
                 if (isHit) {
+                    // FIX: verificar si el personaje ya existe en este grupo (cualquier dueño)
+                    // porque la PK de claims es (char_id, group_id), no incluye owner_jid.
+                    // Si solo verificamos por owner_jid, otro usuario puede ya tenerlo y
+                    // el INSERT lanzaría SQLITE_CONSTRAINT: UNIQUE constraint failed.
                     const existingInDb = await this.db.get(
-                        'SELECT 1 FROM claims WHERE char_id = ? AND owner_jid = ? AND group_id = ?',
-                        [char.id, userJid, groupId]
+                        'SELECT 1 FROM claims WHERE char_id = ? AND group_id = ?',
+                        [char.id, groupId]
                     );
                     // También es repetido si ya salió en esta misma tirada
                     const existingInSession = pulledThisSession.has(char.id);
@@ -458,6 +462,4 @@ export class Kamijs {
             params
         );
     }
-}
-
-
+    }
