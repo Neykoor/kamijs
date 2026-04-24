@@ -201,7 +201,6 @@ export class Kamijs {
     }
 
     async withdrawBank(amount, toJid, sock) {
-        // BUG FIX: rechazar amount negativo o cero para evitar que sume al banco
         if (amount <= 0) throw new Error('INVALID_AMOUNT');
 
         const userJid = await LidGuard.clean(sock, toJid);
@@ -244,22 +243,16 @@ export class Kamijs {
         const from = await LidGuard.clean(sock, fromJid);
         const to   = await LidGuard.clean(sock, toJid);
 
-        // Verificar que el emisor posee el personaje
         const claim = await this.db.get(
             'SELECT * FROM claims WHERE char_id = ? AND owner_jid = ? AND group_id = ?',
             [charId, from, groupId]
         );
         if (!claim) throw new Error('CHARACTER_NOT_OWNED');
 
-        // Verificar que el receptor no sea el mismo dueño
         if (from === to) throw new Error('SELF_TRADE');
 
         await this.db.run('BEGIN IMMEDIATE');
         try {
-            // BUG FIX: el UPDATE ya garantiza atomicidad con AND owner_jid = ?
-            // No hace falta un SELECT previo por ALREADY_CLAIMED porque la PK
-            // (char_id, group_id) es única — si el UPDATE no afecta filas, el from
-            // ya no lo tenía (race condition). Verificamos changes.
             const result = await this.db.run(
                 'UPDATE claims SET owner_jid = ? WHERE char_id = ? AND owner_jid = ? AND group_id = ?',
                 [to, charId, from, groupId]
@@ -369,14 +362,11 @@ export class Kamijs {
 
                     if (!char) throw new Error('EMPTY_POOL');
 
-                    // BUG FIX: jackpot se maneja como delta neto del banco separado de bankAccrued
-                    // para no mezclar la resta del jackpot con la acumulación del banco por repeats.
                     if (Math.random() < 0.01) {
                         const bankBalance = await this.getBank();
                         if (bankBalance > 0) {
                             const maxJackpot = 20000;
                             jackpotBonus = Math.min(Math.floor(bankBalance * 0.05), maxJackpot);
-                            // Se resta directamente ahora para no depender de bankAccrued al final
                             await this.db.run(
                                 'UPDATE bank SET balance = MAX(0, balance - ?) WHERE id = 1',
                                 [jackpotBonus]
@@ -404,6 +394,8 @@ export class Kamijs {
                             'UPDATE users SET balance = balance + ? WHERE jid = ?',
                             [repeatCompensation, userJid]
                         );
+                        // FIX: agregar al set para que no salga repetido en el mismo pull
+                        pulledThisSession.add(char.id);
                     } else {
                         pulledThisSession.add(char.id);
                         await this.db.run(
@@ -427,7 +419,7 @@ export class Kamijs {
                 await this.db.run('UPDATE bank SET balance = balance + ? WHERE id = 1', [bankAccrued]);
             }
 
-            // BUG FIX: guardia WHERE balance >= ? para evitar balance negativo por race condition
+            // Guardia WHERE balance >= ? para evitar balance negativo por race condition
             const result = await this.db.run(
                 `UPDATE users
                  SET balance = balance - ?, pity_count = ?, has_guaranteed = ?, luck = ?
@@ -488,4 +480,5 @@ export class Kamijs {
             params
         );
     }
-}
+            }
+        
