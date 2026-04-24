@@ -132,6 +132,7 @@ export class Kamijs {
         const banner = await this.getActiveBanner();
         const now = Date.now();
 
+        // Banner todavía válido → no rotar
         if (banner && banner.expires_at > now) return null;
 
         const history = await this.db.all(
@@ -154,7 +155,10 @@ export class Kamijs {
             );
         }
 
-        if (!randomSeries) return null;
+        if (!randomSeries) {
+            console.warn('[Kamijs] checkAndRotateBanner: no hay series en la base de datos.');
+            return null;
+        }
 
         const featured = await this.db.get(
             `SELECT * FROM characters WHERE series = ? ORDER BY RANDOM() LIMIT 1`,
@@ -179,6 +183,7 @@ export class Kamijs {
     }
 
     async deposit(jid, amount, sock) {
+        if (amount <= 0) throw new Error('INVALID_AMOUNT');
         const userJid = await LidGuard.clean(sock, jid);
         await this.db.run(
             `INSERT INTO users (jid, balance, pity_count, has_guaranteed)
@@ -196,6 +201,9 @@ export class Kamijs {
     }
 
     async withdrawBank(amount, toJid, sock) {
+        // BUG FIX: rechazar amount negativo o cero para evitar que sume al banco
+        if (amount <= 0) throw new Error('INVALID_AMOUNT');
+
         const userJid = await LidGuard.clean(sock, toJid);
         const bank = await this.getBank();
         if (bank < amount) throw new Error('BANK_INSUFFICIENT_FUNDS');
@@ -236,24 +244,27 @@ export class Kamijs {
         const from = await LidGuard.clean(sock, fromJid);
         const to   = await LidGuard.clean(sock, toJid);
 
+        // Verificar que el emisor posee el personaje
         const claim = await this.db.get(
             'SELECT * FROM claims WHERE char_id = ? AND owner_jid = ? AND group_id = ?',
             [charId, from, groupId]
         );
         if (!claim) throw new Error('CHARACTER_NOT_OWNED');
 
-        const alreadyOwned = await this.db.get(
-            'SELECT 1 FROM claims WHERE char_id = ? AND owner_jid = ? AND group_id = ?',
-            [charId, to, groupId]
-        );
-        if (alreadyOwned) throw new Error('ALREADY_CLAIMED');
+        // Verificar que el receptor no sea el mismo dueño
+        if (from === to) throw new Error('SELF_TRADE');
 
         await this.db.run('BEGIN IMMEDIATE');
         try {
-            await this.db.run(
+            // BUG FIX: el UPDATE ya garantiza atomicidad con AND owner_jid = ?
+            // No hace falta un SELECT previo por ALREADY_CLAIMED porque la PK
+            // (char_id, group_id) es única — si el UPDATE no afecta filas, el from
+            // ya no lo tenía (race condition). Verificamos changes.
+            const result = await this.db.run(
                 'UPDATE claims SET owner_jid = ? WHERE char_id = ? AND owner_jid = ? AND group_id = ?',
                 [to, charId, from, groupId]
             );
+            if (result.changes === 0) throw new Error('CHARACTER_NOT_OWNED');
             await this.db.run('COMMIT');
         } catch (e) {
             await this.db.run('ROLLBACK').catch(() => {});
@@ -356,20 +367,26 @@ export class Kamijs {
                         p = 0;
                     }
 
+                    if (!char) throw new Error('EMPTY_POOL');
+
+                    // BUG FIX: jackpot se maneja como delta neto del banco separado de bankAccrued
+                    // para no mezclar la resta del jackpot con la acumulación del banco por repeats.
                     if (Math.random() < 0.01) {
                         const bankBalance = await this.getBank();
                         if (bankBalance > 0) {
                             const maxJackpot = 20000;
                             jackpotBonus = Math.min(Math.floor(bankBalance * 0.05), maxJackpot);
-                            bankAccrued -= jackpotBonus;
+                            // Se resta directamente ahora para no depender de bankAccrued al final
+                            await this.db.run(
+                                'UPDATE bank SET balance = MAX(0, balance - ?) WHERE id = 1',
+                                [jackpotBonus]
+                            );
                             await this.db.run(
                                 'UPDATE users SET balance = balance + ? WHERE jid = ?',
                                 [jackpotBonus, userJid]
                             );
                         }
                     }
-
-                    if (!char) throw new Error('EMPTY_POOL');
 
                     const existingClaim = await this.db.get(
                         'SELECT owner_jid FROM claims WHERE char_id = ? AND group_id = ?',
@@ -405,18 +422,20 @@ export class Kamijs {
                 results.push({ ...char, isFeatured, isRepeat, repeatCompensation, jackpotBonus, pity: p, luck: parseFloat(luck.toFixed(4)) });
             }
 
+            // Acumular en banco solo lo de repeats (jackpot ya se descontó en el loop)
             if (bankAccrued > 0) {
                 await this.db.run('UPDATE bank SET balance = balance + ? WHERE id = 1', [bankAccrued]);
-            } else if (bankAccrued < 0) {
-                await this.db.run('UPDATE bank SET balance = MAX(0, balance + ?) WHERE id = 1', [bankAccrued]);
             }
 
-            await this.db.run(
+            // BUG FIX: guardia WHERE balance >= ? para evitar balance negativo por race condition
+            const result = await this.db.run(
                 `UPDATE users
                  SET balance = balance - ?, pity_count = ?, has_guaranteed = ?, luck = ?
-                 WHERE jid = ?`,
-                [PULL_COST, p, g, luck, userJid]
+                 WHERE jid = ? AND balance >= ?`,
+                [PULL_COST, p, g, luck, userJid, PULL_COST]
             );
+
+            if (result.changes === 0) throw new Error('INSUFFICIENT_FUNDS');
 
             await this.db.run('COMMIT');
             return results;
