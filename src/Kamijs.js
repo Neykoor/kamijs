@@ -7,11 +7,11 @@ import { LidGuard } from './middleware/LidGuard.js';
 
 const PULL_COST       = 4000;
 
-const HIT_RATE_RW     = 0.025;
-const HIT_RATE_BANNER = 0.025;
+const HIT_RATE_RW     = 0.015;
+const HIT_RATE_BANNER = 0.015;
 
-const PITY_LIMIT_RW     = 150;
-const PITY_LIMIT_BANNER = 150;
+const PITY_LIMIT_RW     = 100;
+const PITY_LIMIT_BANNER = 100;
 
 const REPEAT_CAP      = 2000;
 
@@ -318,20 +318,17 @@ export class Kamijs {
                 let repeatCompensation = 0;
                 let jackpotBonus = 0;
 
-                const isLastPull = i === 9;
                 const pityHit = p >= PITY_LIMIT;
-                const multiGuarantee = isLastPull && !hitOccurred;
 
                 const softRate =
-                    p >= 110 ? 0.08 :
-                    p >= 90  ? 0.05 :
-                    p >= 70  ? 0.04 :
+                    p >= 80  ? 0.06 :
+                    p >= 60  ? 0.04 :
+                    p >= 40  ? 0.025 :
                     HIT_RATE;
                 const effectiveRate = Math.min(softRate + luck, 1);
 
                 const isHit =
                     (pityHit && !hitOccurred) ||
-                    multiGuarantee ||
                     Math.random() < effectiveRate;
 
                 if (isHit) {
