@@ -35,7 +35,8 @@ export class Kamijs {
                 series TEXT,
                 gender TEXT,
                 booru_tag TEXT,
-                value INTEGER DEFAULT 3000
+                value INTEGER DEFAULT 3000,
+                global_limit INTEGER DEFAULT NULL
             );
 
             CREATE TABLE IF NOT EXISTS active_banner (
@@ -76,8 +77,10 @@ export class Kamijs {
             INSERT OR IGNORE INTO bank (id, balance) VALUES (1, 0);
         `);
 
+        // Parches automáticos para actualizar bases de datos viejas
         await this.db.run(`UPDATE characters SET value = 3000 WHERE value IS NULL`);
         await this.db.run(`ALTER TABLE users ADD COLUMN luck REAL DEFAULT 0`).catch(() => {});
+        await this.db.run(`ALTER TABLE characters ADD COLUMN global_limit INTEGER DEFAULT NULL`).catch(() => {});
     }
 
     // --- MÉTODOS ADMINISTRATIVOS ---
@@ -91,9 +94,9 @@ export class Kamijs {
 
         const charId = data.id || crypto.randomBytes(4).toString('hex');
         await this.db.run(
-            `INSERT INTO characters (id, name, series, gender, booru_tag, value)
-             VALUES (?, ?, ?, ?, ?, ?)`,
-            [charId, data.name, data.series, data.gender, data.booru_tag || data.name, data.value || 3000]
+            `INSERT INTO characters (id, name, series, gender, booru_tag, value, global_limit)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [charId, data.name, data.series, data.gender, data.booru_tag || data.name, data.value || 3000, data.global_limit || null]
         );
         return charId;
     }
@@ -403,6 +406,9 @@ export class Kamijs {
         const conditions = [];
         const params = [];
 
+        // REGLA DE ORO: Verificamos el límite global de exclusividad (Sold Out en todo el bot)
+        conditions.push('(c.global_limit IS NULL OR c.global_limit > (SELECT COUNT(*) FROM claims WHERE char_id = c.id))');
+
         // Si es banner, SOLO saca de la serie promocional
         if (type === 'banner' && banner?.series_target) {
             conditions.push('LOWER(c.series) = LOWER(?)');
@@ -444,4 +450,4 @@ export class Kamijs {
             params
         );
     }
-    }
+}
