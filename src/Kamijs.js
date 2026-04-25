@@ -6,10 +6,8 @@ import crypto from 'crypto';
 import { LidGuard } from './middleware/LidGuard.js';
 
 const PULL_COST       = 4000;
-
 const HIT_RATE_RW     = 0.015;
 const HIT_RATE_BANNER = 0.015;
-
 const PITY_LIMIT_RW     = 100;
 const PITY_LIMIT_BANNER = 100;
 
@@ -36,7 +34,7 @@ export class Kamijs {
                 gender TEXT,
                 booru_tag TEXT,
                 value INTEGER DEFAULT 3000,
-                global_limit INTEGER DEFAULT NULL
+                global_limit INTEGER DEFAULT 15
             );
 
             CREATE TABLE IF NOT EXISTS active_banner (
@@ -77,13 +75,11 @@ export class Kamijs {
             INSERT OR IGNORE INTO bank (id, balance) VALUES (1, 0);
         `);
 
-        // Parches automáticos para actualizar bases de datos viejas
         await this.db.run(`UPDATE characters SET value = 3000 WHERE value IS NULL`);
         await this.db.run(`ALTER TABLE users ADD COLUMN luck REAL DEFAULT 0`).catch(() => {});
-        await this.db.run(`ALTER TABLE characters ADD COLUMN global_limit INTEGER DEFAULT NULL`).catch(() => {});
+        await this.db.run(`ALTER TABLE characters ADD COLUMN global_limit INTEGER DEFAULT 15`).catch(() => {});
+        await this.db.run(`UPDATE characters SET global_limit = 15 WHERE global_limit IS NULL`).catch(() => {});
     }
-
-    // --- MÉTODOS ADMINISTRATIVOS ---
 
     async addCharacter(data) {
         const existing = await this.db.get(
@@ -96,7 +92,7 @@ export class Kamijs {
         await this.db.run(
             `INSERT INTO characters (id, name, series, gender, booru_tag, value, global_limit)
              VALUES (?, ?, ?, ?, ?, ?, ?)`,
-            [charId, data.name, data.series, data.gender, data.booru_tag || data.name, data.value || 3000, data.global_limit || null]
+            [charId, data.name, data.series, data.gender, data.booru_tag || data.name, data.value || 3000, data.global_limit ?? 15]
         );
         return charId;
     }
@@ -157,9 +153,7 @@ export class Kamijs {
             );
         }
 
-        if (!randomSeries) {
-            return null;
-        }
+        if (!randomSeries) return null;
 
         const featured = await this.db.get(
             `SELECT * FROM characters WHERE series = ? ORDER BY RANDOM() LIMIT 1`,
@@ -290,7 +284,6 @@ export class Kamijs {
 
         const isBannerMode = type === 'banner';
         
-        // Buscamos siempre el banner activo para poder excluir su serie del global
         const banner = await this.db.get('SELECT * FROM active_banner WHERE id = 1');
 
         if (isBannerMode && !banner) throw new Error('NO_ACTIVE_BANNER');
@@ -325,7 +318,7 @@ export class Kamijs {
                 if (isHit) {
                     hitOccurred = true;
                     luck = 0;
-                    p = 0; // Se resetea el pity al ganar
+                    p = 0;
 
                     char = await this._getRandom(type, banner, null, pulledThisSession, groupId);
                     if (!char) throw new Error('EMPTY_POOL');
@@ -406,16 +399,13 @@ export class Kamijs {
         const conditions = [];
         const params = [];
 
-        // REGLA DE ORO: Verificamos el límite global de exclusividad (Sold Out en todo el bot)
         conditions.push('(c.global_limit IS NULL OR c.global_limit > (SELECT COUNT(*) FROM claims WHERE char_id = c.id))');
 
-        // Si es banner, SOLO saca de la serie promocional
         if (type === 'banner' && banner?.series_target) {
             conditions.push('LOWER(c.series) = LOWER(?)');
             params.push(banner.series_target);
         }
 
-        // Si es global (rw), EXCLUYE la serie que está actualmente en el banner
         if (type === 'global' && banner?.series_target) {
             conditions.push('LOWER(c.series) != LOWER(?)');
             params.push(banner.series_target);
@@ -450,4 +440,5 @@ export class Kamijs {
             params
         );
     }
-}
+            }
+            
