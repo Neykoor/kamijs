@@ -365,12 +365,12 @@ export class Kamijs {
                         );
                     }
                 } else {
+                    // [CORRECCIÓN]: Solo aumentamos la suerte. NO hacemos fetch de personaje.
                     luck = Math.min(luck + 0.001, 0.02);
-                    char = await this._getRandom(type, banner, null, pulledThisSession, groupId);
-                    if (!char) throw new Error('EMPTY_POOL');
                 }
 
-                results.push({ ...char, isRepeat, repeatCompensation, jackpotBonus, pity: p, luck: parseFloat(luck.toFixed(4)) });
+                // [CORRECCIÓN]: Evitamos el spread operator crasheando si 'char' es null usando (char || {})
+                results.push({ ...(char || {}), isRepeat, repeatCompensation, jackpotBonus, pity: p, luck: parseFloat(luck.toFixed(4)) });
             }
 
             if (bankAccrued > 0) {
@@ -440,5 +440,4 @@ export class Kamijs {
             params
         );
     }
-            }
-            
+}
