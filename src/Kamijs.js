@@ -51,7 +51,10 @@ export class Kamijs {
                 pity_count INTEGER DEFAULT 0,
                 has_guaranteed INTEGER DEFAULT 0,
                 luck REAL DEFAULT 0,
-                last_active INTEGER DEFAULT 0
+                last_active INTEGER DEFAULT 0,
+                has_starter INTEGER DEFAULT 0,
+                tickets INTEGER DEFAULT 0,
+                premium_tickets INTEGER DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS claims (
@@ -71,17 +74,29 @@ export class Kamijs {
                 used_at INTEGER
             );
 
+            /* TABLA DEL MERCADO GLOBAL */
+            CREATE TABLE IF NOT EXISTS market (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                seller_jid TEXT,
+                char_id TEXT,
+                price INTEGER,
+                listed_at INTEGER
+            );
+
             INSERT OR IGNORE INTO bank (id, balance) VALUES (1, 0);
         `);
 
-        // Actualizaciones de columnas por si es base de datos antigua
+        // Migraciones y actualizaciones de columnas
         await this.db.run(`UPDATE characters SET value = 3000 WHERE value IS NULL`);
         await this.db.run(`ALTER TABLE users ADD COLUMN luck REAL DEFAULT 0`).catch(() => {});
         await this.db.run(`ALTER TABLE characters ADD COLUMN global_limit INTEGER DEFAULT 15`).catch(() => {});
         await this.db.run(`UPDATE characters SET global_limit = 15 WHERE global_limit IS NULL`).catch(() => {});
         await this.db.run(`ALTER TABLE users ADD COLUMN last_active INTEGER DEFAULT 0`).catch(() => {});
-
-        // Migración a Inventario Global: Eliminar dependencia de group_id
+        await this.db.run(`ALTER TABLE users ADD COLUMN has_starter INTEGER DEFAULT 0`).catch(() => {});
+        await this.db.run(`ALTER TABLE users ADD COLUMN tickets INTEGER DEFAULT 0`).catch(() => {});
+        await this.db.run(`ALTER TABLE users ADD COLUMN premium_tickets INTEGER DEFAULT 0`).catch(() => {});
+        
+        // Migración a Inventario Global
         const claimsInfo = await this.db.all("PRAGMA table_info(claims)");
         const hasGroupId = claimsInfo.some(col => col.name === 'group_id');
         if (hasGroupId) {
@@ -101,7 +116,8 @@ export class Kamijs {
         }
     }
 
-    // Actualiza la última vez que se vio al usuario
+    // --- SISTEMA DE PRESENCIA Y LIMPIEZA ---
+
     async updatePresence(sock, jid) {
         if (!jid) return;
         const userJid = await LidGuard.clean(sock, jid);
@@ -113,11 +129,9 @@ export class Kamijs {
         );
     }
 
-    // Limpia los personajes de quienes llevan 14 días inactivos
     async cleanInactiveUsers() {
         const TWO_WEEKS = 14 * 24 * 60 * 60 * 1000;
         const cutoff = Date.now() - TWO_WEEKS;
-        
         const result = await this.db.run(
             `DELETE FROM claims 
              WHERE owner_jid IN (SELECT jid FROM users WHERE last_active > 0 AND last_active < ?)`,
@@ -128,7 +142,136 @@ export class Kamijs {
         }
     }
 
-    // RESTO DE MÉTODOS DEL MOTOR (Ajustados para formato global)
+    // --- SISTEMA DE STARTER Y TICKETS ---
+
+    async claimStarter(jid, charId, sock) {
+        const userJid = await LidGuard.clean(sock, jid);
+        await this.updatePresence(sock, jid);
+
+        await this.db.run(`INSERT OR IGNORE INTO users (jid) VALUES (?)`, [userJid]);
+        const user = await this.db.get('SELECT has_starter FROM users WHERE jid = ?', [userJid]);
+        
+        if (user.has_starter) throw new Error('ALREADY_CLAIMED_STARTER');
+
+        const char = await this.db.get('SELECT * FROM characters WHERE id = ? COLLATE NOCASE OR LOWER(name) = LOWER(?)', [charId, charId]);
+        if (!char) throw new Error('CHARACTER_NOT_FOUND');
+
+        const claimsCount = await this.db.get('SELECT COUNT(*) as count FROM claims WHERE char_id = ?', [char.id]);
+        if (char.global_limit && claimsCount.count >= char.global_limit) {
+            throw new Error('OUT_OF_STOCK');
+        }
+
+        await this.db.run('BEGIN IMMEDIATE');
+        try {
+            await this.db.run(`INSERT INTO claims (char_id, owner_jid, claimed_at) VALUES (?, ?, ?)`, [char.id, userJid, Date.now()]);
+            await this.db.run(`UPDATE users SET has_starter = 1 WHERE jid = ?`, [userJid]);
+            await this.db.run('COMMIT');
+            return char;
+        } catch (e) {
+            await this.db.run('ROLLBACK').catch(() => {});
+            throw e;
+        }
+    }
+
+    async useTicket(jid, charId, usePremium = false, sock) {
+        const userJid = await LidGuard.clean(sock, jid);
+        await this.updatePresence(sock, jid);
+
+        const user = await this.db.get('SELECT tickets, premium_tickets FROM users WHERE jid = ?', [userJid]);
+        if (!user) throw new Error('USER_NOT_FOUND');
+
+        if (usePremium && user.premium_tickets <= 0) throw new Error('NO_PREMIUM_TICKETS');
+        if (!usePremium && user.tickets <= 0) throw new Error('NO_TICKETS');
+
+        const char = await this.db.get('SELECT * FROM characters WHERE id = ? COLLATE NOCASE OR LOWER(name) = LOWER(?)', [charId, charId]);
+        if (!char) throw new Error('CHARACTER_NOT_FOUND');
+
+        const claimsCount = await this.db.get('SELECT COUNT(*) as count FROM claims WHERE char_id = ?', [char.id]);
+        if (!usePremium && char.global_limit && claimsCount.count >= char.global_limit) {
+            throw new Error('OUT_OF_STOCK');
+        }
+
+        const alreadyOwns = await this.db.get('SELECT * FROM claims WHERE char_id = ? AND owner_jid = ?', [char.id, userJid]);
+        if (alreadyOwns) throw new Error('ALREADY_OWNS');
+
+        await this.db.run('BEGIN IMMEDIATE');
+        try {
+            await this.db.run(`INSERT INTO claims (char_id, owner_jid, claimed_at) VALUES (?, ?, ?)`, [char.id, userJid, Date.now()]);
+            
+            if (usePremium) {
+                await this.db.run(`UPDATE users SET premium_tickets = premium_tickets - 1 WHERE jid = ?`, [userJid]);
+            } else {
+                await this.db.run(`UPDATE users SET tickets = tickets - 1 WHERE jid = ?`, [userJid]);
+            }
+            
+            await this.db.run('COMMIT');
+            return char;
+        } catch (e) {
+            await this.db.run('ROLLBACK').catch(() => {});
+            throw e;
+        }
+    }
+
+    async addTickets(jid, amount, isPremium = false, sock) {
+        const userJid = await LidGuard.clean(sock, jid);
+        const column = isPremium ? 'premium_tickets' : 'tickets';
+        await this.db.run(`INSERT OR IGNORE INTO users (jid) VALUES (?)`, [userJid]);
+        await this.db.run(`UPDATE users SET ${column} = ${column} + ? WHERE jid = ?`, [amount, userJid]);
+    }
+
+    // --- MERCADO GLOBAL ---
+
+    async listMarket(jid, charId, price, sock) {
+        if (price <= 0) throw new Error('INVALID_PRICE');
+        const userJid = await LidGuard.clean(sock, jid);
+        
+        const claim = await this.db.get('SELECT * FROM claims WHERE char_id = ? AND owner_jid = ?', [charId, userJid]);
+        if (!claim) throw new Error('CHARACTER_NOT_OWNED');
+
+        const existing = await this.db.get('SELECT * FROM market WHERE char_id = ? AND seller_jid = ?', [charId, userJid]);
+        if (existing) throw new Error('ALREADY_LISTED');
+
+        await this.db.run(`INSERT INTO market (seller_jid, char_id, price, listed_at) VALUES (?, ?, ?, ?)`, [userJid, charId, price, Date.now()]);
+    }
+
+    async buyFromMarket(jid, marketId, sock) {
+        const userJid = await LidGuard.clean(sock, jid);
+        
+        const listing = await this.db.get('SELECT * FROM market WHERE id = ?', [marketId]);
+        if (!listing) throw new Error('LISTING_NOT_FOUND');
+        if (listing.seller_jid === userJid) throw new Error('CANNOT_BUY_OWN');
+
+        const user = await this.db.get('SELECT balance FROM users WHERE jid = ?', [userJid]);
+        if (!user || user.balance < listing.price) throw new Error('INSUFFICIENT_FUNDS');
+
+        const claim = await this.db.get('SELECT * FROM claims WHERE char_id = ? AND owner_jid = ?', [listing.char_id, listing.seller_jid]);
+        if (!claim) {
+            await this.db.run('DELETE FROM market WHERE id = ?', [marketId]);
+            throw new Error('SELLER_NO_LONGER_OWNS');
+        }
+
+        const buyerClaim = await this.db.get('SELECT * FROM claims WHERE char_id = ? AND owner_jid = ?', [listing.char_id, userJid]);
+        if (buyerClaim) throw new Error('ALREADY_OWNS');
+
+        await this.db.run('BEGIN IMMEDIATE');
+        try {
+            const tax = Math.floor(listing.price * 0.05);
+            const net = listing.price - tax;
+
+            await this.db.run('UPDATE users SET balance = balance - ? WHERE jid = ?', [listing.price, userJid]);
+            await this.db.run('UPDATE users SET balance = balance + ? WHERE jid = ?', [net, listing.seller_jid]);
+            await this.db.run('UPDATE bank SET balance = balance + ? WHERE id = 1', [tax]);
+
+            await this.db.run('UPDATE claims SET owner_jid = ? WHERE char_id = ? AND owner_jid = ?', [userJid, listing.char_id, listing.seller_jid]);
+            await this.db.run('DELETE FROM market WHERE id = ?', [marketId]);
+
+            await this.db.run('COMMIT');
+        } catch (e) {
+            await this.db.run('ROLLBACK').catch(() => {});
+            throw e;
+        }
+    }
+        // --- MÉTODOS BASE DEL GACHA ---
 
     async addCharacter(data) {
         const existing = await this.db.get(
@@ -241,10 +384,9 @@ export class Kamijs {
         }
     }
 
-    // Se eliminó groupId porque el inventario ahora es global
     async getHarem(jid, sock) {
         const userJid = await LidGuard.clean(sock, jid);
-        await this.updatePresence(sock, jid); // Marca actividad al ver el harem
+        await this.updatePresence(sock, jid);
         return await this.db.all(
             `SELECT c.id, c.name, c.series, c.gender, c.value, cl.claimed_at
              FROM claims cl JOIN characters c ON cl.char_id = c.id
@@ -253,7 +395,6 @@ export class Kamijs {
         );
     }
 
-    // Se eliminó groupId porque los intercambios son globales
     async trade(fromJid, toJid, charId, sock) {
         const from = await LidGuard.clean(sock, fromJid);
         const to   = await LidGuard.clean(sock, toJid);
@@ -277,7 +418,6 @@ export class Kamijs {
         }
     }
 
-    // Se unificó para ver todos los dueños a nivel global
     async getSeriesCharacters(series) {
         return await this.db.all(
             `SELECT c.id, c.name, c.gender, c.series, c.global_limit,
@@ -295,7 +435,7 @@ export class Kamijs {
         const { sock } = options;
         const userJid = await LidGuard.clean(sock, jid);
 
-        await this.updatePresence(sock, jid); // Marca presencia al tirar
+        await this.updatePresence(sock, jid);
 
         const HIT_RATE   = type === 'banner' ? HIT_RATE_BANNER : HIT_RATE_RW;
         const PITY_LIMIT = type === 'banner' ? PITY_LIMIT_BANNER : PITY_LIMIT_RW;
@@ -351,7 +491,6 @@ export class Kamijs {
                         }
                     }
 
-                    // Verifica si EL USUARIO ya lo tiene (inventario global)
                     const existingClaim = await this.db.get('SELECT owner_jid FROM claims WHERE char_id = ? AND owner_jid = ?', [char.id, userJid]);
                     const existingInSession = pulledThisSession.has(char.id);
 
@@ -370,7 +509,23 @@ export class Kamijs {
                 } else {
                     luck = Math.min(luck + 0.001, 0.02);
                 }
-                results.push({ ...(char || {}), isRepeat, repeatCompensation, jackpotBonus, pity: p, luck: parseFloat(luck.toFixed(4)) });
+
+                // 🎟️ Probabilidad del 2% de soltar un Ticket de Selección Normal
+                let droppedTicket = false;
+                if (Math.random() < 0.02) { 
+                    droppedTicket = true;
+                    await this.db.run(`UPDATE users SET tickets = tickets + 1 WHERE jid = ?`, [userJid]);
+                }
+
+                results.push({ 
+                    ...(char || {}), 
+                    isRepeat, 
+                    repeatCompensation, 
+                    jackpotBonus, 
+                    droppedTicket,
+                    pity: p, 
+                    luck: parseFloat(luck.toFixed(4)) 
+                });
             }
 
             if (bankAccrued > 0) {
@@ -417,4 +572,5 @@ export class Kamijs {
         const where = conditions.length > 0 ? ' WHERE ' + conditions.join(' AND ') : '';
         return await this.db.get(`SELECT c.* FROM characters c${where} ORDER BY RANDOM() LIMIT 1`, params);
     }
-            }
+                }
+                        
