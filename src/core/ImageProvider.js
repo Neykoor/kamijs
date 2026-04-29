@@ -17,20 +17,26 @@ export class ImageProvider {
 
             if (!Array.isArray(posts)) return null;
 
-            // --- FILTRO: BLOQUEAR ÚNICAMENTE LOLIS DESNUDAS/EXPLÍCITAS ---
+            // --- FILTRO AVANZADO ---
             return posts.filter(post => {
                 const tags = (post.tags || '').toLowerCase();
                 const tagsArray = tags.split(/\s+/);
                 
                 const isLoli = tagsArray.includes('loli');
-                const isNaked = post.rating === 'e' || tagsArray.includes('naked') || tagsArray.includes('nude');
+                const isExplicit = post.rating === 'e' || tagsArray.includes('sex') || tagsArray.includes('naked') || tagsArray.includes('nude');
+                const isQuestionable = post.rating === 'q';
 
-                // Si se cumplen ambas (es loli Y es explícita/desnuda), se descarta
-                if (isLoli && isNaked) {
+                // Regla 1: Bloqueo general de contenido explícito o sexo para TODOS los personajes
+                if (isExplicit) {
                     return false;
                 }
                 
-                // Cualquier otro caso (loli segura o personaje no-loli explícito) pasa
+                // Regla 2: Si el personaje es loli, bloqueamos también el contenido ecchi/questionable
+                if (isLoli && isQuestionable) {
+                    return false;
+                }
+                
+                // Cualquier otro caso pasa (personajes normales en 'q' o 's', y lolis exclusivamente en 's')
                 return true;
             });
             // -------------------------------------------------------------
