@@ -50,15 +50,14 @@ export class Kamijs {
                 balance INTEGER DEFAULT 0,
                 pity_count INTEGER DEFAULT 0,
                 has_guaranteed INTEGER DEFAULT 0,
-                luck REAL DEFAULT 0
+                luck REAL DEFAULT 0,
+                last_active INTEGER DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS claims (
                 char_id TEXT,
                 owner_jid TEXT,
-                group_id TEXT,
-                claimed_at INTEGER,
-                PRIMARY KEY (char_id, group_id)
+                claimed_at INTEGER
             );
 
             CREATE TABLE IF NOT EXISTS bank (
@@ -75,11 +74,61 @@ export class Kamijs {
             INSERT OR IGNORE INTO bank (id, balance) VALUES (1, 0);
         `);
 
+        // Actualizaciones de columnas por si es base de datos antigua
         await this.db.run(`UPDATE characters SET value = 3000 WHERE value IS NULL`);
         await this.db.run(`ALTER TABLE users ADD COLUMN luck REAL DEFAULT 0`).catch(() => {});
         await this.db.run(`ALTER TABLE characters ADD COLUMN global_limit INTEGER DEFAULT 15`).catch(() => {});
         await this.db.run(`UPDATE characters SET global_limit = 15 WHERE global_limit IS NULL`).catch(() => {});
+        await this.db.run(`ALTER TABLE users ADD COLUMN last_active INTEGER DEFAULT 0`).catch(() => {});
+
+        // Migración a Inventario Global: Eliminar dependencia de group_id
+        const claimsInfo = await this.db.all("PRAGMA table_info(claims)");
+        const hasGroupId = claimsInfo.some(col => col.name === 'group_id');
+        if (hasGroupId) {
+            await this.db.exec(`
+                CREATE TABLE claims_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    char_id TEXT,
+                    owner_jid TEXT,
+                    claimed_at INTEGER
+                );
+                INSERT INTO claims_new (char_id, owner_jid, claimed_at)
+                SELECT char_id, owner_jid, MAX(claimed_at) FROM claims GROUP BY char_id, owner_jid;
+                DROP TABLE claims;
+                ALTER TABLE claims_new RENAME TO claims;
+            `);
+            console.log("[Kamijs] Migración a inventario global completada.");
+        }
     }
+
+    // Actualiza la última vez que se vio al usuario
+    async updatePresence(sock, jid) {
+        if (!jid) return;
+        const userJid = await LidGuard.clean(sock, jid);
+        const now = Date.now();
+        await this.db.run(
+            `INSERT INTO users (jid, balance, last_active) VALUES (?, 0, ?)
+             ON CONFLICT(jid) DO UPDATE SET last_active = ?`,
+            [userJid, now, now]
+        );
+    }
+
+    // Limpia los personajes de quienes llevan 14 días inactivos
+    async cleanInactiveUsers() {
+        const TWO_WEEKS = 14 * 24 * 60 * 60 * 1000;
+        const cutoff = Date.now() - TWO_WEEKS;
+        
+        const result = await this.db.run(
+            `DELETE FROM claims 
+             WHERE owner_jid IN (SELECT jid FROM users WHERE last_active > 0 AND last_active < ?)`,
+            [cutoff]
+        );
+        if (result.changes > 0) {
+            console.log(`[Kamijs] Se liberaron ${result.changes} personajes de usuarios inactivos.`);
+        }
+    }
+
+    // RESTO DE MÉTODOS DEL MOTOR (Ajustados para formato global)
 
     async addCharacter(data) {
         const existing = await this.db.get(
@@ -98,10 +147,7 @@ export class Kamijs {
     }
 
     async getRandomCharacterBySeries(series) {
-        return await this.db.get(
-            `SELECT * FROM characters WHERE LOWER(series) = LOWER(?) ORDER BY RANDOM() LIMIT 1`,
-            [series]
-        );
+        return await this.db.get(`SELECT * FROM characters WHERE LOWER(series) = LOWER(?) ORDER BY RANDOM() LIMIT 1`, [series]);
     }
 
     async getCharacter(id) {
@@ -112,12 +158,9 @@ export class Kamijs {
         const expiresAt = Date.now() + durationDays * 24 * 60 * 60 * 1000;
         await this.db.run(
             `INSERT INTO active_banner (id, title, series_target, featured_id, expires_at)
-             VALUES (1, ?, ?, ?, ?)
-             ON CONFLICT(id) DO UPDATE SET
-             title = excluded.title,
-             series_target = excluded.series_target,
-             featured_id = excluded.featured_id,
-             expires_at = excluded.expires_at`,
+             VALUES (1, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET
+             title = excluded.title, series_target = excluded.series_target,
+             featured_id = excluded.featured_id, expires_at = excluded.expires_at`,
             [title, series, featuredId, expiresAt]
         );
         return expiresAt;
@@ -130,12 +173,9 @@ export class Kamijs {
     async checkAndRotateBanner() {
         const banner = await this.getActiveBanner();
         const now = Date.now();
-
         if (banner && banner.expires_at > now) return null;
 
-        const history = await this.db.all(
-            `SELECT series FROM banner_history ORDER BY used_at DESC LIMIT 3`
-        );
+        const history = await this.db.all(`SELECT series FROM banner_history ORDER BY used_at DESC LIMIT 3`);
         const excluded = history.map(r => r.series);
 
         let randomSeries;
@@ -148,31 +188,19 @@ export class Kamijs {
         }
 
         if (!randomSeries) {
-            randomSeries = await this.db.get(
-                `SELECT series FROM characters GROUP BY series ORDER BY RANDOM() LIMIT 1`
-            );
+            randomSeries = await this.db.get(`SELECT series FROM characters GROUP BY series ORDER BY RANDOM() LIMIT 1`);
         }
 
         if (!randomSeries) return null;
 
-        const featured = await this.db.get(
-            `SELECT * FROM characters WHERE series = ? ORDER BY RANDOM() LIMIT 1`,
-            [randomSeries.series]
-        );
+        const featured = await this.db.get(`SELECT * FROM characters WHERE series = ? ORDER BY RANDOM() LIMIT 1`, [randomSeries.series]);
         if (!featured) return null;
 
         const title = `✨ Banner de ${randomSeries.series}`;
         const expiresAt = await this.setBanner(title, randomSeries.series, featured.id);
 
-        await this.db.run(
-            `INSERT INTO banner_history (series, used_at) VALUES (?, ?)`,
-            [randomSeries.series, now]
-        );
-        await this.db.run(
-            `DELETE FROM banner_history WHERE id NOT IN (
-                SELECT id FROM banner_history ORDER BY used_at DESC LIMIT 3
-            )`
-        );
+        await this.db.run(`INSERT INTO banner_history (series, used_at) VALUES (?, ?)`, [randomSeries.series, now]);
+        await this.db.run(`DELETE FROM banner_history WHERE id NOT IN (SELECT id FROM banner_history ORDER BY used_at DESC LIMIT 3)`);
 
         return { title, series: randomSeries.series, featured, expiresAt };
     }
@@ -181,8 +209,7 @@ export class Kamijs {
         if (amount <= 0) throw new Error('INVALID_AMOUNT');
         const userJid = await LidGuard.clean(sock, jid);
         await this.db.run(
-            `INSERT INTO users (jid, balance, pity_count, has_guaranteed)
-             VALUES (?, ?, 0, 0)
+            `INSERT INTO users (jid, balance, pity_count, has_guaranteed) VALUES (?, ?, 0, 0)
              ON CONFLICT(jid) DO UPDATE SET balance = balance + ?`,
             [userJid, amount, amount]
         );
@@ -195,7 +222,6 @@ export class Kamijs {
 
     async withdrawBank(amount, toJid, sock) {
         if (amount <= 0) throw new Error('INVALID_AMOUNT');
-
         const userJid = await LidGuard.clean(sock, toJid);
         const bank = await this.getBank();
         if (bank < amount) throw new Error('BANK_INSUFFICIENT_FUNDS');
@@ -204,8 +230,7 @@ export class Kamijs {
         try {
             await this.db.run('UPDATE bank SET balance = balance - ? WHERE id = 1', [amount]);
             await this.db.run(
-                `INSERT INTO users (jid, balance, pity_count, has_guaranteed)
-                 VALUES (?, ?, 0, 0)
+                `INSERT INTO users (jid, balance, pity_count, has_guaranteed) VALUES (?, ?, 0, 0)
                  ON CONFLICT(jid) DO UPDATE SET balance = balance + ?`,
                 [userJid, amount, amount]
             );
@@ -216,36 +241,34 @@ export class Kamijs {
         }
     }
 
-    async getHarem(jid, groupId = 'global', sock) {
+    // Se eliminó groupId porque el inventario ahora es global
+    async getHarem(jid, sock) {
         const userJid = await LidGuard.clean(sock, jid);
+        await this.updatePresence(sock, jid); // Marca actividad al ver el harem
         return await this.db.all(
             `SELECT c.id, c.name, c.series, c.gender, c.value, cl.claimed_at
-             FROM claims cl
-             JOIN characters c ON cl.char_id = c.id
-             WHERE cl.owner_jid = ? AND cl.group_id = ?
-             ORDER BY cl.claimed_at DESC`,
-            [userJid, groupId]
+             FROM claims cl JOIN characters c ON cl.char_id = c.id
+             WHERE cl.owner_jid = ? ORDER BY cl.claimed_at DESC`,
+            [userJid]
         );
     }
 
-    async trade(fromJid, toJid, charId, groupId = 'global', sock) {
+    // Se eliminó groupId porque los intercambios son globales
+    async trade(fromJid, toJid, charId, sock) {
         const from = await LidGuard.clean(sock, fromJid);
         const to   = await LidGuard.clean(sock, toJid);
+        await this.updatePresence(sock, fromJid);
 
-        const claim = await this.db.get(
-            'SELECT * FROM claims WHERE char_id = ? AND owner_jid = ? AND group_id = ?',
-            [charId, from, groupId]
-        );
+        const claim = await this.db.get('SELECT * FROM claims WHERE char_id = ? AND owner_jid = ?', [charId, from]);
         if (!claim) throw new Error('CHARACTER_NOT_OWNED');
-
         if (from === to) throw new Error('SELF_TRADE');
+
+        const receiverClaim = await this.db.get('SELECT * FROM claims WHERE char_id = ? AND owner_jid = ?', [charId, to]);
+        if (receiverClaim) throw new Error('RECEIVER_ALREADY_OWNS');
 
         await this.db.run('BEGIN IMMEDIATE');
         try {
-            const result = await this.db.run(
-                'UPDATE claims SET owner_jid = ? WHERE char_id = ? AND owner_jid = ? AND group_id = ?',
-                [to, charId, from, groupId]
-            );
+            const result = await this.db.run('UPDATE claims SET owner_jid = ? WHERE char_id = ? AND owner_jid = ?', [to, charId, from]);
             if (result.changes === 0) throw new Error('CHARACTER_NOT_OWNED');
             await this.db.run('COMMIT');
         } catch (e) {
@@ -254,28 +277,31 @@ export class Kamijs {
         }
     }
 
-    async getSeriesCharacters(series, groupId = 'global') {
+    // Se unificó para ver todos los dueños a nivel global
+    async getSeriesCharacters(series) {
         return await this.db.all(
-            `SELECT c.id, c.name, c.gender, c.value,
-                    cl.owner_jid
+            `SELECT c.id, c.name, c.gender, c.series, c.global_limit,
+                    GROUP_CONCAT(cl.owner_jid) as global_owners,
+                    (SELECT COUNT(*) FROM claims WHERE char_id = c.id) as total_claims
              FROM characters c
-             LEFT JOIN claims cl ON cl.char_id = c.id AND cl.group_id = ?
+             LEFT JOIN claims cl ON cl.char_id = c.id
              WHERE LOWER(c.series) = LOWER(?)
-             ORDER BY c.name ASC`,
-            [groupId, series]
+             GROUP BY c.id ORDER BY c.name ASC`,
+            [series]
         );
     }
 
     async pull10(jid, type = 'banner', options = {}) {
-        const { sock, groupId = 'global' } = options;
+        const { sock } = options;
         const userJid = await LidGuard.clean(sock, jid);
+
+        await this.updatePresence(sock, jid); // Marca presencia al tirar
 
         const HIT_RATE   = type === 'banner' ? HIT_RATE_BANNER : HIT_RATE_RW;
         const PITY_LIMIT = type === 'banner' ? PITY_LIMIT_BANNER : PITY_LIMIT_RW;
 
         await this.db.run(
-            `INSERT OR IGNORE INTO users (jid, balance, pity_count, has_guaranteed)
-             VALUES (?, 0, 0, 0)`,
+            `INSERT OR IGNORE INTO users (jid, balance, pity_count, has_guaranteed) VALUES (?, 0, 0, 0)`,
             [userJid]
         );
 
@@ -283,9 +309,7 @@ export class Kamijs {
         if (!user || user.balance < PULL_COST) throw new Error('INSUFFICIENT_FUNDS');
 
         const isBannerMode = type === 'banner';
-        
         const banner = await this.db.get('SELECT * FROM active_banner WHERE id = 1');
-
         if (isBannerMode && !banner) throw new Error('NO_ACTIVE_BANNER');
 
         const results = [];
@@ -305,14 +329,8 @@ export class Kamijs {
                 let jackpotBonus = 0;
 
                 const pityHit = p >= PITY_LIMIT;
-
-                const softRate =
-                    p >= 80  ? 0.06 :
-                    p >= 60  ? 0.04 :
-                    p >= 40  ? 0.025 :
-                    HIT_RATE;
+                const softRate = p >= 80 ? 0.06 : p >= 60 ? 0.04 : p >= 40 ? 0.025 : HIT_RATE;
                 const effectiveRate = Math.min(softRate + luck, 1);
-
                 const isHit = (pityHit && !hitOccurred) || Math.random() < effectiveRate;
 
                 if (isHit) {
@@ -320,7 +338,7 @@ export class Kamijs {
                     luck = 0;
                     p = 0;
 
-                    char = await this._getRandom(type, banner, null, pulledThisSession, groupId);
+                    char = await this._getRandom(type, banner, null, pulledThisSession);
                     if (!char) throw new Error('EMPTY_POOL');
 
                     if (Math.random() < 0.01) {
@@ -328,48 +346,30 @@ export class Kamijs {
                         if (bankBalance > 0) {
                             const maxJackpot = 20000;
                             jackpotBonus = Math.min(Math.floor(bankBalance * 0.05), maxJackpot);
-                            await this.db.run(
-                                'UPDATE bank SET balance = MAX(0, balance - ?) WHERE id = 1',
-                                [jackpotBonus]
-                            );
-                            await this.db.run(
-                                'UPDATE users SET balance = balance + ? WHERE jid = ?',
-                                [jackpotBonus, userJid]
-                            );
+                            await this.db.run('UPDATE bank SET balance = MAX(0, balance - ?) WHERE id = 1', [jackpotBonus]);
+                            await this.db.run('UPDATE users SET balance = balance + ? WHERE jid = ?', [jackpotBonus, userJid]);
                         }
                     }
 
-                    const existingClaim = await this.db.get(
-                        'SELECT owner_jid FROM claims WHERE char_id = ? AND group_id = ?',
-                        [char.id, groupId]
-                    );
+                    // Verifica si EL USUARIO ya lo tiene (inventario global)
+                    const existingClaim = await this.db.get('SELECT owner_jid FROM claims WHERE char_id = ? AND owner_jid = ?', [char.id, userJid]);
                     const existingInSession = pulledThisSession.has(char.id);
 
                     if (existingClaim || existingInSession) {
                         isRepeat = true;
-                        char.currentOwnerJid = existingClaim?.owner_jid || null;
+                        char.currentOwnerJid = userJid;
                         const charValue = char.value || 0;
                         repeatCompensation = Math.floor(charValue * 0.30);
                         bankAccrued += charValue - repeatCompensation;
-                        await this.db.run(
-                            'UPDATE users SET balance = balance + ? WHERE jid = ?',
-                            [repeatCompensation, userJid]
-                        );
+                        await this.db.run('UPDATE users SET balance = balance + ? WHERE jid = ?', [repeatCompensation, userJid]);
                         pulledThisSession.add(char.id);
                     } else {
                         pulledThisSession.add(char.id);
-                        await this.db.run(
-                            `INSERT INTO claims (char_id, owner_jid, group_id, claimed_at)
-                             VALUES (?, ?, ?, ?)`,
-                            [char.id, userJid, groupId, Date.now()]
-                        );
+                        await this.db.run(`INSERT INTO claims (char_id, owner_jid, claimed_at) VALUES (?, ?, ?)`, [char.id, userJid, Date.now()]);
                     }
                 } else {
-                    // [CORRECCIÓN]: Solo aumentamos la suerte. NO hacemos fetch de personaje.
                     luck = Math.min(luck + 0.001, 0.02);
                 }
-
-                // [CORRECCIÓN]: Evitamos el spread operator crasheando si 'char' es null usando (char || {})
                 results.push({ ...(char || {}), isRepeat, repeatCompensation, jackpotBonus, pity: p, luck: parseFloat(luck.toFixed(4)) });
             }
 
@@ -378,44 +378,36 @@ export class Kamijs {
             }
 
             const result = await this.db.run(
-                `UPDATE users
-                 SET balance = balance - ?, pity_count = ?, luck = ?
-                 WHERE jid = ? AND balance >= ?`,
+                `UPDATE users SET balance = balance - ?, pity_count = ?, luck = ? WHERE jid = ? AND balance >= ?`,
                 [PULL_COST, p, luck, userJid, PULL_COST]
             );
 
             if (result.changes === 0) throw new Error('INSUFFICIENT_FUNDS');
-
             await this.db.run('COMMIT');
             return results;
-
         } catch (e) {
             await this.db.run('ROLLBACK').catch(() => {});
             throw e;
         }
     }
 
-    async _getRandom(type, banner, excludeId, excludeSet = new Set(), groupId = null) {
+    async _getRandom(type, banner, excludeId, excludeSet = new Set()) {
         const conditions = [];
         const params = [];
-
         conditions.push('(c.global_limit IS NULL OR c.global_limit > (SELECT COUNT(*) FROM claims WHERE char_id = c.id))');
 
         if (type === 'banner' && banner?.series_target) {
             conditions.push('LOWER(c.series) = LOWER(?)');
             params.push(banner.series_target);
         }
-
         if (type === 'global' && banner?.series_target) {
             conditions.push('LOWER(c.series) != LOWER(?)');
             params.push(banner.series_target);
         }
-
         if (excludeId) {
             conditions.push('c.id != ?');
             params.push(excludeId);
         }
-
         if (excludeSet.size > 0) {
             const placeholders = Array.from(excludeSet).map(() => '?').join(', ');
             conditions.push(`c.id NOT IN (${placeholders})`);
@@ -423,21 +415,6 @@ export class Kamijs {
         }
 
         const where = conditions.length > 0 ? ' WHERE ' + conditions.join(' AND ') : '';
-
-        if (groupId) {
-            return await this.db.get(
-                `SELECT c.*, cl.owner_jid AS currentOwnerJid
-                 FROM characters c
-                 LEFT JOIN claims cl ON cl.char_id = c.id AND cl.group_id = ?
-                 ${where}
-                 ORDER BY RANDOM() LIMIT 1`,
-                [groupId, ...params]
-            );
-        }
-
-        return await this.db.get(
-            `SELECT c.* FROM characters c${where} ORDER BY RANDOM() LIMIT 1`,
-            params
-        );
+        return await this.db.get(`SELECT c.* FROM characters c${where} ORDER BY RANDOM() LIMIT 1`, params);
     }
-}
+            }
