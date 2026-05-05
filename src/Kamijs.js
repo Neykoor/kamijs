@@ -1,9 +1,8 @@
-import fs from 'fs';
-import path from 'path';
-import sqlite3 from 'sqlite3';
-import { open } from 'sqlite';
-import crypto from 'crypto';
-import { LidGuard } from './middleware/LidGuard.js';
+import fs from "fs";
+import path from "path";
+import Database from "better-sqlite3";
+import crypto from "crypto";
+import { LidGuard } from "./middleware/LidGuard.js";
 
 const PULL_COST = 4000;
 const HIT_RATE_RW = 0.015;
@@ -12,107 +11,45 @@ const MAX_MARKET_PRICE = 1000000000;
 
 export class Kamijs {
     constructor(config = {}) {
-        this.dbPath = config.dbPath || './database/gacha.db';
+        this.dbPath = config.dbPath || "./database/gacha.db";
         this.db = null;
     }
 
-    async init() {
+    init() {
         const dir = path.dirname(this.dbPath);
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-        this.db = await open({ filename: this.dbPath, driver: sqlite3.Database });
+        
+        this.db = new Database(this.dbPath);
+        this.db.pragma("busy_timeout = 5000");
+        this.db.pragma("journal_mode = WAL");
 
-        await this.db.exec(`
-            PRAGMA busy_timeout = 5000;
-            PRAGMA journal_mode = WAL;
-            
-            CREATE TABLE IF NOT EXISTS characters (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                series TEXT NOT NULL,
-                gender TEXT,
-                booru_tag TEXT,
-                value INTEGER DEFAULT 3000,
-                global_limit INTEGER DEFAULT 15
-            );
-            
-            CREATE TABLE IF NOT EXISTS users (
-                jid TEXT PRIMARY KEY,
-                balance INTEGER DEFAULT 0,
-                pity_count INTEGER DEFAULT 0,
-                luck REAL DEFAULT 0,
-                last_active INTEGER DEFAULT 0,
-                has_starter INTEGER DEFAULT 0,
-                tickets INTEGER DEFAULT 0
-            );
-            
-            CREATE TABLE IF NOT EXISTS claims (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                char_id TEXT,
-                owner_jid TEXT,
-                claimed_at INTEGER
-            );
-            
-            CREATE TABLE IF NOT EXISTS bank (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                balance INTEGER DEFAULT 0
-            );
-            
-            CREATE TABLE IF NOT EXISTS market (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                seller_jid TEXT,
-                char_id TEXT,
-                price INTEGER,
-                listed_at INTEGER
-            );
-
-            CREATE TABLE IF NOT EXISTS migrations (
-                version INTEGER PRIMARY KEY
-            );
-            
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS characters (id TEXT PRIMARY KEY, name TEXT NOT NULL, series TEXT NOT NULL, gender TEXT, booru_tag TEXT, value INTEGER DEFAULT 3000, global_limit INTEGER DEFAULT 15);
+            CREATE TABLE IF NOT EXISTS users (jid TEXT PRIMARY KEY, balance INTEGER DEFAULT 0, pity_count INTEGER DEFAULT 0, luck REAL DEFAULT 0, last_active INTEGER DEFAULT 0, has_starter INTEGER DEFAULT 0, tickets INTEGER DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS claims (id INTEGER PRIMARY KEY AUTOINCREMENT, char_id TEXT, owner_jid TEXT, claimed_at INTEGER);
+            CREATE TABLE IF NOT EXISTS bank (id INTEGER PRIMARY KEY CHECK (id = 1), balance INTEGER DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS market (id INTEGER PRIMARY KEY AUTOINCREMENT, seller_jid TEXT, char_id TEXT, price INTEGER, listed_at INTEGER);
+            CREATE TABLE IF NOT EXISTS migrations (version INTEGER PRIMARY KEY);
             INSERT OR IGNORE INTO bank (id, balance) VALUES (1, 0);
         `);
 
-        const currentVersionObj = await this.db.get('SELECT MAX(version) as v FROM migrations');
-        let currentVersion = currentVersionObj?.v || 0;
+        const currentVersion = this.db.prepare("SELECT MAX(version) as v FROM migrations").get()?.v || 0;
 
         if (currentVersion < 1) {
-            await this.db.run(`UPDATE characters SET value = 3000 WHERE value IS NULL`);
-            
-            const userCols = await this.db.all("PRAGMA table_info(users)");
-            if (!userCols.some(col => col.name === 'luck')) {
-                await this.db.exec(`
-                    ALTER TABLE users ADD COLUMN luck REAL DEFAULT 0;
-                    ALTER TABLE users ADD COLUMN last_active INTEGER DEFAULT 0;
-                    ALTER TABLE users ADD COLUMN has_starter INTEGER DEFAULT 0;
-                    ALTER TABLE users ADD COLUMN tickets INTEGER DEFAULT 0;
-                `);
+            this.db.prepare("UPDATE characters SET value = 3000 WHERE value IS NULL").run();
+            const userCols = this.db.pragma("table_info(users)");
+            if (!userCols.some((col) => col.name === "luck")) {
+                this.db.exec("ALTER TABLE users ADD COLUMN luck REAL DEFAULT 0; ALTER TABLE users ADD COLUMN last_active INTEGER DEFAULT 0; ALTER TABLE users ADD COLUMN has_starter INTEGER DEFAULT 0; ALTER TABLE users ADD COLUMN tickets INTEGER DEFAULT 0;");
             }
-
-            const charCols = await this.db.all("PRAGMA table_info(characters)");
-            if (!charCols.some(col => col.name === 'global_limit')) {
-                await this.db.exec(`
-                    ALTER TABLE characters ADD COLUMN global_limit INTEGER DEFAULT 15;
-                    UPDATE characters SET global_limit = 15 WHERE global_limit IS NULL;
-                `);
+            const charCols = this.db.pragma("table_info(characters)");
+            if (!charCols.some((col) => col.name === "global_limit")) {
+                this.db.exec("ALTER TABLE characters ADD COLUMN global_limit INTEGER DEFAULT 15; UPDATE characters SET global_limit = 15 WHERE global_limit IS NULL;");
             }
-
-            const claimsInfo = await this.db.all("PRAGMA table_info(claims)");
-            if (claimsInfo.some(col => col.name === 'group_id')) {
-                await this.db.exec(`
-                    CREATE TABLE claims_new (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        char_id TEXT,
-                        owner_jid TEXT,
-                        claimed_at INTEGER
-                    );
-                    INSERT INTO claims_new (char_id, owner_jid, claimed_at)
-                    SELECT char_id, owner_jid, MAX(claimed_at) FROM claims GROUP BY char_id, owner_jid;
-                    DROP TABLE claims;
-                    ALTER TABLE claims_new RENAME TO claims;
-                `);
+            const claimsInfo = this.db.pragma("table_info(claims)");
+            if (claimsInfo.some((col) => col.name === "group_id")) {
+                this.db.exec("CREATE TABLE claims_new (id INTEGER PRIMARY KEY AUTOINCREMENT, char_id TEXT, owner_jid TEXT, claimed_at INTEGER); INSERT INTO claims_new (char_id, owner_jid, claimed_at) SELECT char_id, owner_jid, MAX(claimed_at) FROM claims GROUP BY char_id, owner_jid; DROP TABLE claims; ALTER TABLE claims_new RENAME TO claims;");
             }
-            
-            await this.db.run(`INSERT INTO migrations (version) VALUES (1)`);
+            this.db.prepare("INSERT INTO migrations (version) VALUES (1)").run();
         }
     }
 
@@ -120,379 +57,226 @@ export class Kamijs {
         if (!jid) return;
         const userJid = await LidGuard.clean(sock, jid);
         const now = Date.now();
-        await this.db.run(
-            `INSERT INTO users (jid, balance, last_active) VALUES (?, 0, ?)
-             ON CONFLICT(jid) DO UPDATE SET last_active = ?`,
-            [userJid, now, now]
-        );
+        this.db.prepare("INSERT INTO users (jid, balance, last_active) VALUES (?, 0, ?) ON CONFLICT(jid) DO UPDATE SET last_active = ?").run(userJid, now, now);
     }
 
-    async cleanInactiveUsers() {
-        const TWO_WEEKS = 14 * 24 * 60 * 60 * 1000;
-        const cutoff = Date.now() - TWO_WEEKS;
-        await this.db.run(
-            `DELETE FROM claims
-             WHERE owner_jid IN (SELECT jid FROM users WHERE last_active > 0 AND last_active < ?)`,
-            [cutoff]
-        );
-        await this.db.run(
-            `DELETE FROM users WHERE last_active > 0 AND last_active < ?`,
-            [cutoff]
-        );
+    cleanInactiveUsers() {
+        const cutoff = Date.now() - 1209600000;
+        this.db.prepare("DELETE FROM claims WHERE owner_jid IN (SELECT jid FROM users WHERE last_active > 0 AND last_active < ?)").run(cutoff);
+        this.db.prepare("DELETE FROM users WHERE last_active > 0 AND last_active < ?").run(cutoff);
     }
 
     async claimStarter(jid, charId, sock) {
         const userJid = await LidGuard.clean(sock, jid);
         await this.updatePresence(sock, jid);
-        await this.db.run(`INSERT OR IGNORE INTO users (jid) VALUES (?)`, [userJid]);
+        this.db.prepare("INSERT OR IGNORE INTO users (jid) VALUES (?)").run(userJid);
         
-        await this.db.run('BEGIN IMMEDIATE');
-        try {
-            const user = await this.db.get('SELECT has_starter FROM users WHERE jid = ?', [userJid]);
-            if (user.has_starter) throw new Error('ALREADY_CLAIMED_STARTER');
+        return this.db.transaction(() => {
+            if (this.db.prepare("SELECT has_starter FROM users WHERE jid = ?").get(userJid).has_starter) throw new Error("ALREADY_CLAIMED_STARTER");
+            const char = this.db.prepare("SELECT * FROM characters WHERE id = ? COLLATE NOCASE OR LOWER(name) = LOWER(?)").get(charId, charId);
+            if (!char) throw new Error("CHARACTER_NOT_FOUND");
+            if (char.global_limit && this.db.prepare("SELECT COUNT(*) as count FROM claims WHERE char_id = ?").get(char.id).count >= char.global_limit) throw new Error("OUT_OF_STOCK");
             
-            const char = await this.db.get('SELECT * FROM characters WHERE id = ? COLLATE NOCASE OR LOWER(name) = LOWER(?)', [charId, charId]);
-            if (!char) throw new Error('CHARACTER_NOT_FOUND');
-            
-            const claimsCount = await this.db.get('SELECT COUNT(*) as count FROM claims WHERE char_id = ?', [char.id]);
-            if (char.global_limit && claimsCount.count >= char.global_limit) throw new Error('OUT_OF_STOCK');
-            
-            await this.db.run(`INSERT INTO claims (char_id, owner_jid, claimed_at) VALUES (?, ?, ?)`, [char.id, userJid, Date.now()]);
-            await this.db.run(`UPDATE users SET has_starter = 1 WHERE jid = ?`, [userJid]);
-            await this.db.run('COMMIT');
+            this.db.prepare("INSERT INTO claims (char_id, owner_jid, claimed_at) VALUES (?, ?, ?)").run(char.id, userJid, Date.now());
+            this.db.prepare("UPDATE users SET has_starter = 1 WHERE jid = ?").run(userJid);
             return char;
-        } catch (e) {
-            await this.db.run('ROLLBACK').catch(() => {});
-            throw e;
-        }
+        })();
     }
 
     async useTicket(jid, charId, sock) {
         const userJid = await LidGuard.clean(sock, jid);
         await this.updatePresence(sock, jid);
         
-        const user = await this.db.get('SELECT tickets FROM users WHERE jid = ?', [userJid]);
-        if (!user) throw new Error('USER_NOT_FOUND');
-        if (user.tickets <= 0) throw new Error('NO_TICKETS');
-        
-        const char = await this.db.get('SELECT * FROM characters WHERE id = ? COLLATE NOCASE OR LOWER(name) = LOWER(?)', [charId, charId]);
-        if (!char) throw new Error('CHARACTER_NOT_FOUND');
-        
-        const claimsCount = await this.db.get('SELECT COUNT(*) as count FROM claims WHERE char_id = ?', [char.id]);
-        if (char.global_limit && claimsCount.count >= char.global_limit) throw new Error('OUT_OF_STOCK');
-        
-        const alreadyOwns = await this.db.get('SELECT * FROM claims WHERE char_id = ? AND owner_jid = ?', [char.id, userJid]);
-        if (alreadyOwns) throw new Error('ALREADY_OWNS');
+        return this.db.transaction(() => {
+            const user = this.db.prepare("SELECT tickets FROM users WHERE jid = ?").get(userJid);
+            if (!user || user.tickets <= 0) throw new Error(user ? "NO_TICKETS" : "USER_NOT_FOUND");
+            
+            const char = this.db.prepare("SELECT * FROM characters WHERE id = ? COLLATE NOCASE OR LOWER(name) = LOWER(?)").get(charId, charId);
+            if (!char) throw new Error("CHARACTER_NOT_FOUND");
+            if (char.global_limit && this.db.prepare("SELECT COUNT(*) as count FROM claims WHERE char_id = ?").get(char.id).count >= char.global_limit) throw new Error("OUT_OF_STOCK");
+            if (this.db.prepare("SELECT * FROM claims WHERE char_id = ? AND owner_jid = ?").get(char.id, userJid)) throw new Error("ALREADY_OWNS");
 
-        const isSuccess = Math.random() < 0.30;
-        await this.db.run('BEGIN IMMEDIATE');
-        try {
-            await this.db.run(`UPDATE users SET tickets = tickets - 1 WHERE jid = ?`, [userJid]);
-            if (isSuccess) {
-                await this.db.run(`INSERT INTO claims (char_id, owner_jid, claimed_at) VALUES (?, ?, ?)`, [char.id, userJid, Date.now()]);
-            }
-            await this.db.run('COMMIT');
-        } catch (e) {
-            await this.db.run('ROLLBACK').catch(() => {});
-            throw e;
-        }
-
-        if (!isSuccess) throw new Error('TICKET_FAILED');
-        return char;
+            const isSuccess = Math.random() < 0.30;
+            this.db.prepare("UPDATE users SET tickets = tickets - 1 WHERE jid = ?").run(userJid);
+            if (isSuccess) this.db.prepare("INSERT INTO claims (char_id, owner_jid, claimed_at) VALUES (?, ?, ?)").run(char.id, userJid, Date.now());
+            if (!isSuccess) throw new Error("TICKET_FAILED");
+            return char;
+        })();
     }
 
     async addTickets(jid, amount, sock) {
         const userJid = await LidGuard.clean(sock, jid);
-        await this.db.run(`INSERT OR IGNORE INTO users (jid) VALUES (?)`, [userJid]);
-        await this.db.run(`UPDATE users SET tickets = tickets + ? WHERE jid = ?`, [amount, userJid]);
+        this.db.transaction(() => {
+            this.db.prepare("INSERT OR IGNORE INTO users (jid) VALUES (?)").run(userJid);
+            this.db.prepare("UPDATE users SET tickets = tickets + ? WHERE jid = ?").run(amount, userJid);
+        })();
     }
 
     async listMarket(jid, charId, price, sock) {
-        if (price <= 0 || price > MAX_MARKET_PRICE) throw new Error('INVALID_PRICE');
+        if (price <= 0 || price > MAX_MARKET_PRICE) throw new Error("INVALID_PRICE");
         const userJid = await LidGuard.clean(sock, jid);
-        
-        const claim = await this.db.get('SELECT * FROM claims WHERE char_id = ? AND owner_jid = ?', [charId, userJid]);
-        if (!claim) throw new Error('CHARACTER_NOT_OWNED');
-        
-        const existing = await this.db.get('SELECT * FROM market WHERE char_id = ? AND seller_jid = ?', [charId, userJid]);
-        if (existing) throw new Error('ALREADY_LISTED');
-        
-        await this.db.run(`INSERT INTO market (seller_jid, char_id, price, listed_at) VALUES (?, ?, ?, ?)`, [userJid, charId, price, Date.now()]);
+        this.db.transaction(() => {
+            if (!this.db.prepare("SELECT * FROM claims WHERE char_id = ? AND owner_jid = ?").get(charId, userJid)) throw new Error("CHARACTER_NOT_OWNED");
+            if (this.db.prepare("SELECT * FROM market WHERE char_id = ? AND seller_jid = ?").get(charId, userJid)) throw new Error("ALREADY_LISTED");
+            this.db.prepare("INSERT INTO market (seller_jid, char_id, price, listed_at) VALUES (?, ?, ?, ?)").run(userJid, charId, price, Date.now());
+        })();
     }
 
     async buyFromMarket(jid, marketId, sock) {
         const userJid = await LidGuard.clean(sock, jid);
-        
-        const listing = await this.db.get('SELECT * FROM market WHERE id = ?', [marketId]);
-        if (!listing) throw new Error('LISTING_NOT_FOUND');
-        if (listing.seller_jid === userJid) throw new Error('CANNOT_BUY_OWN');
-        
-        const user = await this.db.get('SELECT balance FROM users WHERE jid = ?', [userJid]);
-        if (!user || user.balance < listing.price) throw new Error('INSUFFICIENT_FUNDS');
-        
-        const claim = await this.db.get('SELECT * FROM claims WHERE char_id = ? AND owner_jid = ?', [listing.char_id, listing.seller_jid]);
-        if (!claim) {
-            await this.db.run('DELETE FROM market WHERE id = ?', [marketId]);
-            throw new Error('SELLER_NO_LONGER_OWNS');
-        }
-        
-        const buyerClaim = await this.db.get('SELECT * FROM claims WHERE char_id = ? AND owner_jid = ?', [listing.char_id, userJid]);
-        if (buyerClaim) throw new Error('ALREADY_OWNS');
-        
-        await this.db.run('BEGIN IMMEDIATE');
-        try {
+        this.db.transaction(() => {
+            const listing = this.db.prepare("SELECT * FROM market WHERE id = ?").get(marketId);
+            if (!listing) throw new Error("LISTING_NOT_FOUND");
+            if (listing.seller_jid === userJid) throw new Error("CANNOT_BUY_OWN");
+            
+            const user = this.db.prepare("SELECT balance FROM users WHERE jid = ?").get(userJid);
+            if (!user || user.balance < listing.price) throw new Error("INSUFFICIENT_FUNDS");
+            
+            if (!this.db.prepare("SELECT * FROM claims WHERE char_id = ? AND owner_jid = ?").get(listing.char_id, listing.seller_jid)) {
+                this.db.prepare("DELETE FROM market WHERE id = ?").run(marketId);
+                throw new Error("SELLER_NO_LONGER_OWNS");
+            }
+            if (this.db.prepare("SELECT * FROM claims WHERE char_id = ? AND owner_jid = ?").get(listing.char_id, userJid)) throw new Error("ALREADY_OWNS");
+            
             const tax = Math.floor(listing.price * 0.05);
-            const net = listing.price - tax;
-            await this.db.run('UPDATE users SET balance = balance - ? WHERE jid = ?', [listing.price, userJid]);
-            await this.db.run('UPDATE users SET balance = balance + ? WHERE jid = ?', [net, listing.seller_jid]);
-            await this.db.run('UPDATE bank SET balance = balance + ? WHERE id = 1', [tax]);
-            await this.db.run('UPDATE claims SET owner_jid = ? WHERE char_id = ? AND owner_jid = ?', [userJid, listing.char_id, listing.seller_jid]);
-            await this.db.run('DELETE FROM market WHERE id = ?', [marketId]);
-            await this.db.run('COMMIT');
-        } catch (e) {
-            await this.db.run('ROLLBACK').catch(() => {});
-            throw e;
-        }
+            this.db.prepare("UPDATE users SET balance = balance - ? WHERE jid = ?").run(listing.price, userJid);
+            this.db.prepare("UPDATE users SET balance = balance + ? WHERE jid = ?").run(listing.price - tax, listing.seller_jid);
+            this.db.prepare("UPDATE bank SET balance = balance + ? WHERE id = 1").run(tax);
+            this.db.prepare("UPDATE claims SET owner_jid = ? WHERE char_id = ? AND owner_jid = ?").run(userJid, listing.char_id, listing.seller_jid);
+            this.db.prepare("DELETE FROM market WHERE id = ?").run(marketId);
+        })();
     }
-        async addCharacter(data) {
-        if (!data.name || !data.series) throw new Error('MISSING_REQUIRED_FIELDS');
-        const existing = await this.db.get(
-            `SELECT id FROM characters WHERE LOWER(name) = LOWER(?) AND LOWER(series) = LOWER(?)`,
-            [data.name, data.series]
-        );
-        if (existing) throw new Error('DUPLICATE_CHARACTER');
+
+    addCharacter(data) {
+        if (!data.name || !data.series) throw new Error("MISSING_REQUIRED_FIELDS");
+        if (this.db.prepare("SELECT id FROM characters WHERE LOWER(name) = LOWER(?) AND LOWER(series) = LOWER(?)").get(data.name, data.series)) throw new Error("DUPLICATE_CHARACTER");
         
-        const charId = data.id || crypto.randomBytes(4).toString('hex');
-        await this.db.run(
-            `INSERT INTO characters (id, name, series, gender, booru_tag, value, global_limit)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
-            [charId, data.name, data.series, data.gender, data.booru_tag || data.name, data.value || 3000, data.global_limit ?? 15]
-        );
+        const charId = data.id || crypto.randomBytes(4).toString("hex");
+        this.db.prepare("INSERT INTO characters (id, name, series, gender, booru_tag, value, global_limit) VALUES (?, ?, ?, ?, ?, ?, ?)").run(charId, data.name, data.series, data.gender, data.booru_tag || data.name, data.value || 3000, data.global_limit ?? 15);
         return charId;
     }
 
-    async getRandomCharacterBySeries(series) {
-        const chars = await this.db.all(`SELECT id FROM characters WHERE LOWER(series) = LOWER(?)`, [series]);
+    getRandomCharacterBySeries(series) {
+        const chars = this.db.prepare("SELECT id FROM characters WHERE LOWER(series) = LOWER(?)").all(series);
         if (!chars.length) return null;
-        const randomId = chars[Math.floor(Math.random() * chars.length)].id;
-        return await this.db.get('SELECT * FROM characters WHERE id = ?', [randomId]);
+        return this.db.prepare("SELECT * FROM characters WHERE id = ?").get(chars[Math.floor(Math.random() * chars.length)].id);
     }
 
-    async getCharacter(id) {
-        return await this.db.get('SELECT * FROM characters WHERE id = ?', [id]);
+    getCharacter(id) {
+        return this.db.prepare("SELECT * FROM characters WHERE id = ?").get(id);
     }
 
     async deposit(jid, amount, sock) {
-        if (amount <= 0) throw new Error('INVALID_AMOUNT');
+        if (amount <= 0) throw new Error("INVALID_AMOUNT");
         const userJid = await LidGuard.clean(sock, jid);
-        await this.db.run(
-            `INSERT INTO users (jid, balance) VALUES (?, ?)
-             ON CONFLICT(jid) DO UPDATE SET balance = balance + ?`,
-            [userJid, amount, amount]
-        );
+        this.db.prepare("INSERT INTO users (jid, balance) VALUES (?, ?) ON CONFLICT(jid) DO UPDATE SET balance = balance + ?").run(userJid, amount, amount);
     }
 
-    async getBank() {
-        const row = await this.db.get('SELECT balance FROM bank WHERE id = 1');
-        return row?.balance ?? 0;
+    getBank() {
+        return this.db.prepare("SELECT balance FROM bank WHERE id = 1").get()?.balance ?? 0;
     }
 
     async withdrawBank(amount, toJid, sock) {
-        if (amount <= 0) throw new Error('INVALID_AMOUNT');
+        if (amount <= 0) throw new Error("INVALID_AMOUNT");
         const userJid = await LidGuard.clean(sock, toJid);
-        const bank = await this.getBank();
-        if (bank < amount) throw new Error('BANK_INSUFFICIENT_FUNDS');
-        
-        await this.db.run('BEGIN IMMEDIATE');
-        try {
-            await this.db.run('UPDATE bank SET balance = balance - ? WHERE id = 1', [amount]);
-            await this.db.run(
-                `INSERT INTO users (jid, balance) VALUES (?, ?)
-                 ON CONFLICT(jid) DO UPDATE SET balance = balance + ?`,
-                [userJid, amount, amount]
-            );
-            await this.db.run('COMMIT');
-        } catch (e) {
-            await this.db.run('ROLLBACK').catch(() => {});
-            throw e;
-        }
+        this.db.transaction(() => {
+            if (this.getBank() < amount) throw new Error("BANK_INSUFFICIENT_FUNDS");
+            this.db.prepare("UPDATE bank SET balance = balance - ? WHERE id = 1").run(amount);
+            this.db.prepare("INSERT INTO users (jid, balance) VALUES (?, ?) ON CONFLICT(jid) DO UPDATE SET balance = balance + ?").run(userJid, amount, amount);
+        })();
     }
 
     async getHarem(jid, sock) {
         const userJid = await LidGuard.clean(sock, jid);
         await this.updatePresence(sock, jid);
-        return await this.db.all(
-            `SELECT c.id, c.name, c.series, c.gender, c.value, cl.claimed_at
-             FROM claims cl JOIN characters c ON cl.char_id = c.id
-             WHERE cl.owner_jid = ? ORDER BY cl.claimed_at DESC`,
-            [userJid]
-        );
+        return this.db.prepare("SELECT c.id, c.name, c.series, c.gender, c.value, cl.claimed_at FROM claims cl JOIN characters c ON cl.char_id = c.id WHERE cl.owner_jid = ? ORDER BY cl.claimed_at DESC").all(userJid);
     }
 
     async trade(fromJid, toJid, charId, sock) {
         const from = await LidGuard.clean(sock, fromJid);
-        const to   = await LidGuard.clean(sock, toJid);
+        const to = await LidGuard.clean(sock, toJid);
         await this.updatePresence(sock, fromJid);
-        
-        const claim = await this.db.get('SELECT * FROM claims WHERE char_id = ? AND owner_jid = ?', [charId, from]);
-        if (!claim) throw new Error('CHARACTER_NOT_OWNED');
-        if (from === to) throw new Error('SELF_TRADE');
-        
-        const receiverClaim = await this.db.get('SELECT * FROM claims WHERE char_id = ? AND owner_jid = ?', [charId, to]);
-        if (receiverClaim) throw new Error('RECEIVER_ALREADY_OWNS');
-        
-        await this.db.run('BEGIN IMMEDIATE');
-        try {
-            const result = await this.db.run('UPDATE claims SET owner_jid = ? WHERE char_id = ? AND owner_jid = ?', [to, charId, from]);
-            if (result.changes === 0) throw new Error('CHARACTER_NOT_OWNED');
-            await this.db.run('COMMIT');
-        } catch (e) {
-            await this.db.run('ROLLBACK').catch(() => {});
-            throw e;
-        }
+        this.db.transaction(() => {
+            if (!this.db.prepare("SELECT * FROM claims WHERE char_id = ? AND owner_jid = ?").get(charId, from)) throw new Error("CHARACTER_NOT_OWNED");
+            if (from === to) throw new Error("SELF_TRADE");
+            if (this.db.prepare("SELECT * FROM claims WHERE char_id = ? AND owner_jid = ?").get(charId, to)) throw new Error("RECEIVER_ALREADY_OWNS");
+            if (this.db.prepare("UPDATE claims SET owner_jid = ? WHERE char_id = ? AND owner_jid = ?").run(to, charId, from).changes === 0) throw new Error("CHARACTER_NOT_OWNED");
+        })();
     }
 
-    async getSeriesCharacters(series) {
-        return await this.db.all(
-            `SELECT c.id, c.name, c.gender, c.series, c.global_limit,
-                    GROUP_CONCAT(cl.owner_jid) as global_owners,
-                    (SELECT COUNT(*) FROM claims WHERE char_id = c.id) as total_claims
-             FROM characters c
-             LEFT JOIN claims cl ON cl.char_id = c.id
-             WHERE LOWER(c.series) = LOWER(?)
-             GROUP BY c.id ORDER BY c.name ASC`,
-            [series]
-        );
+    getSeriesCharacters(series) {
+        return this.db.prepare("SELECT c.id, c.name, c.gender, c.series, c.global_limit, GROUP_CONCAT(cl.owner_jid) as global_owners, (SELECT COUNT(*) FROM claims WHERE char_id = c.id) as total_claims FROM characters c LEFT JOIN claims cl ON cl.char_id = c.id WHERE LOWER(c.series) = LOWER(?) GROUP BY c.id ORDER BY c.name ASC").all(series);
     }
 
     async pull10(jid, options = {}) {
         const { sock, chatId } = options;
         const userJid = await LidGuard.clean(sock, jid);
         await this.updatePresence(sock, jid);
-        await this.db.run(`INSERT OR IGNORE INTO users (jid) VALUES (?)`, [userJid]);
+        this.db.prepare("INSERT OR IGNORE INTO users (jid) VALUES (?)").run(userJid);
         
-        const user = await this.db.get('SELECT * FROM users WHERE jid = ?', [userJid]);
-        if (!user || user.balance < PULL_COST) throw new Error('INSUFFICIENT_FUNDS');
+        return this.db.transaction(() => {
+            const user = this.db.prepare("SELECT * FROM users WHERE jid = ?").get(userJid);
+            if (!user || user.balance < PULL_COST) throw new Error("INSUFFICIENT_FUNDS");
 
-        const results = [];
-        let p = user.pity_count;
-        let luck = user.luck ?? 0;
-        let currentTickets = user.tickets ?? 0;
-        let bankAccrued = 0;
-        let jackpotTotal = 0;
-        let hitOccurred = false;
-        const pulledThisSession = new Set();
-        const newClaims = [];
-        
-        const bankBalance = await this.getBank();
-        let currentBank = bankBalance;
+            const results = [];
+            let p = user.pity_count, luck = user.luck ?? 0, currentTickets = user.tickets ?? 0;
+            let bankAccrued = 0, jackpotTotal = 0, hitOccurred = false;
+            const pulledThisSession = new Set(), newClaims = [];
+            let currentBank = this.getBank();
 
-        for (let i = 0; i < 10; i++) {
-            p++;
-            let char = null;
-            let isRepeat = false;
-            let repeatCompensation = 0;
-            let jackpotBonus = 0;
-            const pityHit = p >= PITY_LIMIT_RW;
-            const softRate = p >= 80 ? 0.06 : p >= 60 ? 0.04 : p >= 40 ? 0.025 : HIT_RATE_RW;
-            const effectiveRate = Math.min(softRate + luck, 1);
-            const isHit = (pityHit && !hitOccurred) || Math.random() < effectiveRate;
+            for (let i = 0; i < 10; i++) {
+                p++;
+                let char = null, isRepeat = false, repeatCompensation = 0, jackpotBonus = 0;
+                const effectiveRate = Math.min((p >= 80 ? 0.06 : p >= 60 ? 0.04 : p >= 40 ? 0.025 : HIT_RATE_RW) + luck, 1);
 
-            if (isHit) {
-                hitOccurred = true;
-                luck = 0;
-                p = 0;
-                char = await this._getRandom(pulledThisSession);
-                if (!char) throw new Error('EMPTY_POOL');
-                
-                if (Math.random() < 0.01 && currentBank > 0) {
-                    jackpotBonus = Math.min(Math.floor(currentBank * 0.05), 20000);
-                    currentBank -= jackpotBonus;
-                    jackpotTotal += jackpotBonus;
-                }
-                
-                const existingClaim = await this.db.get('SELECT owner_jid FROM claims WHERE char_id = ? AND owner_jid = ?', [char.id, userJid]);
-                const existingInSession = pulledThisSession.has(char.id);
-                
-                if (existingClaim || existingInSession) {
-                    isRepeat = true;
-                    char.currentOwnerJid = userJid;
-                    const charValue = char.value || 0;
-                    repeatCompensation = Math.floor(charValue * 0.30);
-                    bankAccrued += charValue - repeatCompensation;
+                if ((p >= PITY_LIMIT_RW && !hitOccurred) || Math.random() < effectiveRate) {
+                    hitOccurred = true; luck = 0; p = 0;
+                    char = this._getRandomSync(pulledThisSession);
+                    if (!char) throw new Error("EMPTY_POOL");
+                    
+                    if (Math.random() < 0.01 && currentBank > 0) {
+                        jackpotBonus = Math.min(Math.floor(currentBank * 0.05), 20000);
+                        currentBank -= jackpotBonus;
+                        jackpotTotal += jackpotBonus;
+                    }
+                    
+                    if (this.db.prepare("SELECT owner_jid FROM claims WHERE char_id = ? AND owner_jid = ?").get(char.id, userJid) || pulledThisSession.has(char.id)) {
+                        isRepeat = true;
+                        char.currentOwnerJid = userJid;
+                        repeatCompensation = Math.floor((char.value || 0) * 0.30);
+                        bankAccrued += (char.value || 0) - repeatCompensation;
+                    } else {
+                        newClaims.push({ char_id: char.id, owner_jid: userJid, claimed_at: Date.now() });
+                    }
                     pulledThisSession.add(char.id);
                 } else {
-                    pulledThisSession.add(char.id);
-                    newClaims.push({ char_id: char.id, owner_jid: userJid, claimed_at: Date.now() });
+                    luck = Math.min(luck + 0.001, 0.02);
                 }
-            } else {
-                luck = Math.min(luck + 0.001, 0.02);
-            }
 
-            let droppedTicket = false;
-            if (Math.random() < 0.02) {
-                droppedTicket = true;
-                currentTickets++;
-                if (sock && chatId) {
-                    const notifMsg = [
-                        `🎟️ *¡TICKET DE SELECCIÓN OBTENIDO!*`,
-                        `━━━━━━━━━━━━━━━━━━━━`,
-                        `@${userJid.split('@')[0]} consiguió un Ticket de Selección durante su tirada. 🎉`,
-                        ``,
-                        `📦 *Tickets actuales:* ${currentTickets}`,
-                        ``,
-                        `_Úsalo con .ticket [Nombre o ID] para intentar capturar al personaje que quieras._`
-                    ].join('\n');
-                    sock.sendMessage(chatId, { text: notifMsg, mentions: [userJid] }).catch(() => {});
+                let droppedTicket = false;
+                if (Math.random() < 0.02) {
+                    droppedTicket = true; currentTickets++;
+                    if (sock && chatId) sock.sendMessage(chatId, { text: `🎟️ *¡TICKET OBTENIDO!*\n\n@${userJid.split("@")[0]} consiguió un Ticket de Selección. 🎉\n📦 *Tickets:* ${currentTickets}`, mentions: [userJid] }).catch(() => {});
                 }
+                results.push({ ...(char || {}), isRepeat, repeatCompensation, jackpotBonus, droppedTicket, pity: p, luck: parseFloat(luck.toFixed(4)) });
             }
-            results.push({ ...(char || {}), isRepeat, repeatCompensation, jackpotBonus, droppedTicket, pity: p, luck: parseFloat(luck.toFixed(4)) });
-        }
 
-        const totalRepeatCompensation = results.reduce((acc, curr) => acc + (curr.repeatCompensation || 0), 0);
-        const finalUserBalanceIncrease = jackpotTotal + totalRepeatCompensation;
-        const netBankChange = bankAccrued - jackpotTotal;
+            for (const claim of newClaims) this.db.prepare("INSERT INTO claims (char_id, owner_jid, claimed_at) VALUES (?, ?, ?)").run(claim.char_id, claim.owner_jid, claim.claimed_at);
+            if (bankAccrued - jackpotTotal !== 0) this.db.prepare("UPDATE bank SET balance = MAX(0, balance + ?) WHERE id = 1").run(bankAccrued - jackpotTotal);
+            this.db.prepare("UPDATE users SET balance = balance - ? + ?, pity_count = ?, luck = ?, tickets = ? WHERE jid = ?").run(PULL_COST, jackpotTotal + results.reduce((a, c) => a + (c.repeatCompensation || 0), 0), p, luck, currentTickets, userJid);
 
-        await this.db.run('BEGIN IMMEDIATE');
-        try {
-            const checkUser = await this.db.get('SELECT balance FROM users WHERE jid = ?', [userJid]);
-            if (checkUser.balance < PULL_COST) throw new Error('INSUFFICIENT_FUNDS');
-            
-            for (const claim of newClaims) {
-                await this.db.run(`INSERT INTO claims (char_id, owner_jid, claimed_at) VALUES (?, ?, ?)`, [claim.char_id, claim.owner_jid, claim.claimed_at]);
-            }
-            if (netBankChange !== 0) {
-                await this.db.run(`UPDATE bank SET balance = MAX(0, balance + ?) WHERE id = 1`, [netBankChange]);
-            }
-            await this.db.run(
-                `UPDATE users SET balance = balance - ? + ?, pity_count = ?, luck = ?, tickets = ? WHERE jid = ?`,
-                [PULL_COST, finalUserBalanceIncrease, p, luck, currentTickets, userJid]
-            );
-            await this.db.run('COMMIT');
             return results;
-        } catch (e) {
-            await this.db.run('ROLLBACK').catch(() => {});
-            throw e;
-        }
+        })();
     }
 
-    async _getRandom(excludeSet = new Set()) {
-        const conditions = [];
-        const params = [];
-        conditions.push('(c.global_limit IS NULL OR c.global_limit > (SELECT COUNT(*) FROM claims WHERE char_id = c.id))');
-        
+    _getRandomSync(excludeSet = new Set()) {
+        const conditions = ["(c.global_limit IS NULL OR c.global_limit > (SELECT COUNT(*) FROM claims WHERE char_id = c.id))"], params = [];
         if (excludeSet.size > 0) {
-            const placeholders = Array.from(excludeSet).map(() => '?').join(', ');
-            conditions.push(`c.id NOT IN (${placeholders})`);
+            conditions.push(`c.id NOT IN (${Array.from(excludeSet).map(() => "?").join(", ")})`);
             params.push(...excludeSet);
         }
-        
-        const where = ' WHERE ' + conditions.join(' AND ');
-        const candidates = await this.db.all(`SELECT c.id FROM characters c${where}`, params);
-        
+        const candidates = this.db.prepare(`SELECT c.id FROM characters c WHERE ${conditions.join(" AND ")}`).all(...params);
         if (!candidates.length) return null;
-        const selectedId = candidates[Math.floor(Math.random() * candidates.length)].id;
-        
-        return await this.db.get(`SELECT * FROM characters WHERE id = ?`, [selectedId]);
+        return this.db.prepare("SELECT * FROM characters WHERE id = ?").get(candidates[Math.floor(Math.random() * candidates.length)].id);
     }
 }
