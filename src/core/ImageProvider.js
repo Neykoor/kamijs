@@ -6,10 +6,6 @@ export class ImageProvider {
         
         try {
             const cleanTag = tag.replace(/\s+/g, '_').toLowerCase();
-            
-            // LA SOLUCIÓN: Agregamos "-rating:e" a la petición. 
-            // Esto obliga a yande.re a devolver 100 imágenes que NO sean explícitas,
-            // garantizando que siempre haya algo que pase tu filtro local.
             const query = `${cleanTag} -rating:e`;
             const url = `https://yande.re/post.json?tags=${encodeURIComponent(query)}&limit=100`;
             
@@ -23,29 +19,19 @@ export class ImageProvider {
 
             if (!Array.isArray(posts) || posts.length === 0) return null;
 
-            // --- TU FILTRO AVANZADO ---
             return posts.filter(post => {
                 const tags = (post.tags || '').toLowerCase();
                 const tagsArray = tags.split(/\s+/);
                 
                 const isLoli = tagsArray.includes('loli');
                 const isQuestionable = post.rating === 'q';
-
-                // La API ya excluyó el rating 'e', pero por seguridad extra bloqueamos tags específicos
                 const isExplicit = tagsArray.includes('sex') || tagsArray.includes('naked') || tagsArray.includes('nude');
 
-                if (isExplicit) {
-                    return false;
-                }
-                
-                // Tu regla: Si el personaje es loli, bloqueamos el contenido ecchi/questionable
-                if (isLoli && isQuestionable) {
-                    return false;
-                }
+                if (isExplicit) return false;
+                if (isLoli && isQuestionable) return false;
                 
                 return true;
             });
-            // -------------------------------------------------------------
             
         } catch {
             return null;
