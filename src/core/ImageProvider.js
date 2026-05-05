@@ -46,9 +46,9 @@ export class ImageProvider {
             const cleanTag = tag.replace(/\s+/g, '_').toLowerCase();
             let data = await this.#fetchPosts(cleanTag);
 
-            if (!data || !data.length) {
+            if ((!data || !data.length) && cleanTag.includes('_(')) {
                 const simpleTag = cleanTag.split('_(')[0];
-                if (simpleTag !== cleanTag) data = await this.#fetchPosts(simpleTag);
+                data = await this.#fetchPosts(simpleTag);
             }
 
             if (!data || !data.length) return null;
