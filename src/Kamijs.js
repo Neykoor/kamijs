@@ -35,7 +35,6 @@ export class Kamijs {
                 jid TEXT PRIMARY KEY,
                 balance INTEGER DEFAULT 0,
                 pity_count INTEGER DEFAULT 0,
-                has_guaranteed INTEGER DEFAULT 0,
                 luck REAL DEFAULT 0,
                 last_active INTEGER DEFAULT 0,
                 has_starter INTEGER DEFAULT 0,
@@ -233,7 +232,7 @@ export class Kamijs {
         if (amount <= 0) throw new Error('INVALID_AMOUNT');
         const userJid = await LidGuard.clean(sock, jid);
         await this.db.run(
-            `INSERT INTO users (jid, balance, pity_count, has_guaranteed) VALUES (?, ?, 0, 0)
+            `INSERT INTO users (jid, balance, pity_count) VALUES (?, ?, 0)
              ON CONFLICT(jid) DO UPDATE SET balance = balance + ?`,
             [userJid, amount, amount]
         );
@@ -253,7 +252,7 @@ export class Kamijs {
         try {
             await this.db.run('UPDATE bank SET balance = balance - ? WHERE id = 1', [amount]);
             await this.db.run(
-                `INSERT INTO users (jid, balance, pity_count, has_guaranteed) VALUES (?, ?, 0, 0)
+                `INSERT INTO users (jid, balance, pity_count) VALUES (?, ?, 0)
                  ON CONFLICT(jid) DO UPDATE SET balance = balance + ?`,
                 [userJid, amount, amount]
             );
@@ -312,9 +311,7 @@ export class Kamijs {
         const { sock, chatId } = options;
         const userJid = await LidGuard.clean(sock, jid);
         await this.updatePresence(sock, jid);
-        const HIT_RATE = HIT_RATE_RW;
-        const PITY_LIMIT = PITY_LIMIT_RW;
-        await this.db.run(`INSERT OR IGNORE INTO users (jid, balance, pity_count, has_guaranteed) VALUES (?, 0, 0, 0)`, [userJid]);
+        await this.db.run(`INSERT OR IGNORE INTO users (jid, balance, pity_count) VALUES (?, 0, 0)`, [userJid]);
         const user = await this.db.get('SELECT * FROM users WHERE jid = ?', [userJid]);
         if (!user || user.balance < PULL_COST) throw new Error('INSUFFICIENT_FUNDS');
         
@@ -334,8 +331,8 @@ export class Kamijs {
                 let isRepeat = false;
                 let repeatCompensation = 0;
                 let jackpotBonus = 0;
-                const pityHit = p >= PITY_LIMIT;
-                const softRate = p >= 80 ? 0.06 : p >= 60 ? 0.04 : p >= 40 ? 0.025 : HIT_RATE;
+                const pityHit = p >= PITY_LIMIT_RW;
+                const softRate = p >= 80 ? 0.06 : p >= 60 ? 0.04 : p >= 40 ? 0.025 : HIT_RATE_RW;
                 const effectiveRate = Math.min(softRate + luck, 1);
                 const isHit = (pityHit && !hitOccurred) || Math.random() < effectiveRate;
                 
@@ -343,7 +340,7 @@ export class Kamijs {
                     hitOccurred = true;
                     luck = 0;
                     p = 0;
-                    char = await this._getRandom(null, pulledThisSession);
+                    char = await this._getRandom(pulledThisSession);
                     if (!char) throw new Error('EMPTY_POOL');
                     if (Math.random() < 0.01) {
                         const bankBalance = await this.getBank();
@@ -403,14 +400,10 @@ export class Kamijs {
         }
     }
 
-    async _getRandom(excludeId, excludeSet = new Set()) {
+    async _getRandom(excludeSet = new Set()) {
         const conditions = [];
         const params = [];
         conditions.push('(c.global_limit IS NULL OR c.global_limit > (SELECT COUNT(*) FROM claims WHERE char_id = c.id))');
-        if (excludeId) {
-            conditions.push('c.id != ?');
-            params.push(excludeId);
-        }
         if (excludeSet.size > 0) {
             const placeholders = Array.from(excludeSet).map(() => '?').join(', ');
             conditions.push(`c.id NOT IN (${placeholders})`);
@@ -419,6 +412,4 @@ export class Kamijs {
         const where = conditions.length > 0 ? ' WHERE ' + conditions.join(' AND ') : '';
         return await this.db.get(`SELECT c.* FROM characters c${where} ORDER BY RANDOM() LIMIT 1`, params);
     }
-                }
-
-        
+            }
