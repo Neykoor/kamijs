@@ -1,51 +1,34 @@
 export class LidGuard {
-    static #normalize(rawJid) {
-        if (!rawJid || typeof rawJid !== 'string') return rawJid;
-        return rawJid.split(':')[0].split('@')[0] + '@s.whatsapp.net';
+    static #normalize(raw) {
+        return typeof raw === "string" && raw ? `${raw.split(":")[0].split("@")[0]}@s.whatsapp.net` : raw;
     }
 
-    static async clean(sock, rawJid) {
-        if (!rawJid || typeof rawJid !== 'string') return rawJid;
-        if (!sock) return LidGuard.#normalize(rawJid);
-
-        if (rawJid.endsWith('@lid') && sock.lid?.isResolvable && !sock.lid.isResolvable(rawJid)) {
-            return LidGuard.#normalize(rawJid);
+    static async clean(sock, raw) {
+        if (!raw || typeof raw !== "string") return raw;
+        if (!sock || (raw.endsWith("@lid") && sock.lid?.isResolvable && !sock.lid.isResolvable(raw))) {
+            return LidGuard.#normalize(raw);
         }
-
         try {
-            const resolved = await sock.lid?.resolve(rawJid);
-            return resolved ? resolved.toLowerCase() : LidGuard.#normalize(rawJid);
+            return (await sock.lid?.resolve(raw))?.toLowerCase() || LidGuard.#normalize(raw);
         } catch {
-            return LidGuard.#normalize(rawJid);
+            return LidGuard.#normalize(raw);
         }
     }
 
     static async getMention(sock, jid, groupId) {
-        const cleanJid = await LidGuard.clean(sock, jid);
-        const number = cleanJid.split('@')[0];
-
+        const number = (await LidGuard.clean(sock, jid)).split("@")[0];
         if (!sock || !groupId) return number;
-
         try {
             const meta = await sock.groupMetadata(groupId);
-            const isParticipant = meta.participants.some(p => {
-                const pNum = p.id.split(':')[0].split('@')[0];
-                return pNum === number;
-            });
-            return isParticipant ? `@${number}` : number;
+            return meta.participants.some((p) => p.id.split(":")[0].split("@")[0] === number) ? `@${number}` : number;
         } catch {
             return number;
         }
     }
 
     static getMentionSync(jid, participants = []) {
-        if (!jid || typeof jid !== 'string') return '';
-        const number = jid.split(':')[0].split('@')[0];
-        const isParticipant = participants.some(p => {
-            const pNum = (typeof p === 'string' ? p : p.id ?? '')
-                .split(':')[0].split('@')[0];
-            return pNum === number;
-        });
-        return isParticipant ? `@${number}` : number;
+        if (!jid || typeof jid !== "string") return "";
+        const number = jid.split(":")[0].split("@")[0];
+        return participants.some((p) => (typeof p === "string" ? p : p.id || "").split(":")[0].split("@")[0] === number) ? `@${number}` : number;
     }
 }
