@@ -5,7 +5,8 @@
   "main": "src/index.js",
   "exports": "./src/index.js",
   "dependencies": {
-    "better-sqlite3": "^11.0.0",
+    "sqlite": "^5.1.1",
+    "sqlite3": "^5.1.7",
     "lidsync": "^5.0.3"
   },
   "engines": {
