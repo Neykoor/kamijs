@@ -5,11 +5,9 @@ import { open } from 'sqlite';
 import crypto from 'crypto';
 import { LidGuard } from './middleware/LidGuard.js';
 
-const PULL_COST       = 4000;
-const HIT_RATE_RW     = 0.015;
-const HIT_RATE_BANNER = 0.015;
-const PITY_LIMIT_RW     = 100;
-const PITY_LIMIT_BANNER = 100;
+const PULL_COST = 4000;
+const HIT_RATE_RW = 0.015;
+const PITY_LIMIT_RW = 100;
 
 export class Kamijs {
     constructor(config = {}) {
@@ -33,13 +31,6 @@ export class Kamijs {
                 value INTEGER DEFAULT 3000,
                 global_limit INTEGER DEFAULT 15
             );
-            CREATE TABLE IF NOT EXISTS active_banner (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                title TEXT,
-                series_target TEXT,
-                featured_id TEXT,
-                expires_at INTEGER
-            );
             CREATE TABLE IF NOT EXISTS users (
                 jid TEXT PRIMARY KEY,
                 balance INTEGER DEFAULT 0,
@@ -58,11 +49,6 @@ export class Kamijs {
             CREATE TABLE IF NOT EXISTS bank (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 balance INTEGER DEFAULT 0
-            );
-            CREATE TABLE IF NOT EXISTS banner_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                series TEXT,
-                used_at INTEGER
             );
             CREATE TABLE IF NOT EXISTS market (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -156,17 +142,14 @@ export class Kamijs {
         await this.db.run('BEGIN IMMEDIATE');
         try {
             const isSuccess = Math.random() < 0.30;
-            // El ticket se descuenta SIEMPRE, tanto en éxito como en fallo
             await this.db.run(`UPDATE users SET tickets = tickets - 1 WHERE jid = ?`, [userJid]);
             if (isSuccess) {
                 await this.db.run(`INSERT INTO claims (char_id, owner_jid, claimed_at) VALUES (?, ?, ?)`, [char.id, userJid, Date.now()]);
             }
             await this.db.run('COMMIT');
-            // Se lanza FUERA del try para no disparar ROLLBACK de una TX ya cerrada
             if (!isSuccess) throw new Error('TICKET_FAILED');
             return char;
         } catch (e) {
-            // Solo revertir si el error no fue TICKET_FAILED (ese ocurre tras el COMMIT)
             if (e.message !== 'TICKET_FAILED') {
                 await this.db.run('ROLLBACK').catch(() => {});
             }
@@ -218,8 +201,7 @@ export class Kamijs {
             await this.db.run('ROLLBACK').catch(() => {});
             throw e;
         }
-    }
-        async addCharacter(data) {
+             async addCharacter(data) {
         const existing = await this.db.get(
             `SELECT id FROM characters WHERE LOWER(name) = LOWER(?) AND LOWER(series) = LOWER(?)`,
             [data.name, data.series]
@@ -240,49 +222,6 @@ export class Kamijs {
 
     async getCharacter(id) {
         return await this.db.get('SELECT * FROM characters WHERE id = ?', [id]);
-    }
-
-    async setBanner(title, series, featuredId, durationDays = 20) {
-        const expiresAt = Date.now() + durationDays * 24 * 60 * 60 * 1000;
-        await this.db.run(
-            `INSERT INTO active_banner (id, title, series_target, featured_id, expires_at)
-             VALUES (1, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET
-             title = excluded.title, series_target = excluded.series_target,
-             featured_id = excluded.featured_id, expires_at = excluded.expires_at`,
-            [title, series, featuredId, expiresAt]
-        );
-        return expiresAt;
-    }
-
-    async getActiveBanner() {
-        return await this.db.get('SELECT * FROM active_banner WHERE id = 1');
-    }
-
-    async checkAndRotateBanner() {
-        const banner = await this.getActiveBanner();
-        const now = Date.now();
-        if (banner && banner.expires_at > now) return null;
-        const history = await this.db.all(`SELECT series FROM banner_history ORDER BY used_at DESC LIMIT 3`);
-        const excluded = history.map(r => r.series);
-        let randomSeries;
-        if (excluded.length > 0) {
-            const placeholders = excluded.map(() => '?').join(', ');
-            randomSeries = await this.db.get(
-                `SELECT series FROM characters WHERE series NOT IN (${placeholders}) GROUP BY series ORDER BY RANDOM() LIMIT 1`,
-                excluded
-            );
-        }
-        if (!randomSeries) {
-            randomSeries = await this.db.get(`SELECT series FROM characters GROUP BY series ORDER BY RANDOM() LIMIT 1`);
-        }
-        if (!randomSeries) return null;
-        const featured = await this.db.get(`SELECT * FROM characters WHERE series = ? ORDER BY RANDOM() LIMIT 1`, [randomSeries.series]);
-        if (!featured) return null;
-        const title = `✨ Banner de ${randomSeries.series}`;
-        const expiresAt = await this.setBanner(title, randomSeries.series, featured.id);
-        await this.db.run(`INSERT INTO banner_history (series, used_at) VALUES (?, ?)`, [randomSeries.series, now]);
-        await this.db.run(`DELETE FROM banner_history WHERE id NOT IN (SELECT id FROM banner_history ORDER BY used_at DESC LIMIT 3)`);
-        return { title, series: randomSeries.series, featured, expiresAt };
     }
 
     async deposit(jid, amount, sock) {
@@ -364,18 +303,15 @@ export class Kamijs {
         );
     }
 
-    async pull10(jid, type = 'banner', options = {}) {
+    async pull10(jid, options = {}) {
         const { sock, chatId } = options;
         const userJid = await LidGuard.clean(sock, jid);
         await this.updatePresence(sock, jid);
-        const HIT_RATE   = type === 'banner' ? HIT_RATE_BANNER : HIT_RATE_RW;
-        const PITY_LIMIT = type === 'banner' ? PITY_LIMIT_BANNER : PITY_LIMIT_RW;
+        const HIT_RATE = HIT_RATE_RW;
+        const PITY_LIMIT = PITY_LIMIT_RW;
         await this.db.run(`INSERT OR IGNORE INTO users (jid, balance, pity_count, has_guaranteed) VALUES (?, 0, 0, 0)`, [userJid]);
         const user = await this.db.get('SELECT * FROM users WHERE jid = ?', [userJid]);
         if (!user || user.balance < PULL_COST) throw new Error('INSUFFICIENT_FUNDS');
-        const isBannerMode = type === 'banner';
-        const banner = await this.db.get('SELECT * FROM active_banner WHERE id = 1');
-        if (isBannerMode && !banner) throw new Error('NO_ACTIVE_BANNER');
         const results = [];
         let p = user.pity_count;
         let luck = user.luck ?? 0;
@@ -398,7 +334,7 @@ export class Kamijs {
                     hitOccurred = true;
                     luck = 0;
                     p = 0;
-                    char = await this._getRandom(type, banner, null, pulledThisSession);
+                    char = await this._getRandom(null, pulledThisSession);
                     if (!char) throw new Error('EMPTY_POOL');
                     if (Math.random() < 0.01) {
                         const bankBalance = await this.getBank();
@@ -430,7 +366,6 @@ export class Kamijs {
                 if (Math.random() < 0.02) {
                     droppedTicket = true;
                     await this.db.run(`UPDATE users SET tickets = tickets + 1 WHERE jid = ?`, [userJid]);
-                    // Notificar al usuario en el grupo que obtuvo un ticket
                     if (sock && chatId) {
                         const updatedUser = await this.db.get('SELECT tickets FROM users WHERE jid = ?', [userJid]);
                         const totalTickets = updatedUser?.tickets ?? 1;
@@ -459,18 +394,10 @@ export class Kamijs {
         }
     }
 
-    async _getRandom(type, banner, excludeId, excludeSet = new Set()) {
+    async _getRandom(excludeId, excludeSet = new Set()) {
         const conditions = [];
         const params = [];
         conditions.push('(c.global_limit IS NULL OR c.global_limit > (SELECT COUNT(*) FROM claims WHERE char_id = c.id))');
-        if (type === 'banner' && banner?.series_target) {
-            conditions.push('LOWER(c.series) = LOWER(?)');
-            params.push(banner.series_target);
-        }
-        if (type === 'global' && banner?.series_target) {
-            conditions.push('LOWER(c.series) != LOWER(?)');
-            params.push(banner.series_target);
-        }
         if (excludeId) {
             conditions.push('c.id != ?');
             params.push(excludeId);
@@ -483,4 +410,6 @@ export class Kamijs {
         const where = conditions.length > 0 ? ' WHERE ' + conditions.join(' AND ') : '';
         return await this.db.get(`SELECT c.* FROM characters c${where} ORDER BY RANDOM() LIMIT 1`, params);
     }
-}
+        }
+                        }
+    
