@@ -103,6 +103,10 @@ export class Kamijs {
              WHERE owner_jid IN (SELECT jid FROM users WHERE last_active > 0 AND last_active < ?)`,
             [cutoff]
         );
+        await this.db.run(
+            `DELETE FROM users WHERE last_active > 0 AND last_active < ?`,
+            [cutoff]
+        );
     }
 
     async claimStarter(jid, charId, sock) {
@@ -139,22 +143,22 @@ export class Kamijs {
         if (char.global_limit && claimsCount.count >= char.global_limit) throw new Error('OUT_OF_STOCK');
         const alreadyOwns = await this.db.get('SELECT * FROM claims WHERE char_id = ? AND owner_jid = ?', [char.id, userJid]);
         if (alreadyOwns) throw new Error('ALREADY_OWNS');
+        
+        const isSuccess = Math.random() < 0.30;
         await this.db.run('BEGIN IMMEDIATE');
         try {
-            const isSuccess = Math.random() < 0.30;
             await this.db.run(`UPDATE users SET tickets = tickets - 1 WHERE jid = ?`, [userJid]);
             if (isSuccess) {
                 await this.db.run(`INSERT INTO claims (char_id, owner_jid, claimed_at) VALUES (?, ?, ?)`, [char.id, userJid, Date.now()]);
             }
             await this.db.run('COMMIT');
-            if (!isSuccess) throw new Error('TICKET_FAILED');
-            return char;
         } catch (e) {
-            if (e.message !== 'TICKET_FAILED') {
-                await this.db.run('ROLLBACK').catch(() => {});
-            }
+            await this.db.run('ROLLBACK').catch(() => {});
             throw e;
         }
+
+        if (!isSuccess) throw new Error('TICKET_FAILED');
+        return char;
     }
 
     async addTickets(jid, amount, sock) {
@@ -201,7 +205,8 @@ export class Kamijs {
             await this.db.run('ROLLBACK').catch(() => {});
             throw e;
         }
-             async addCharacter(data) {
+    }
+        async addCharacter(data) {
         const existing = await this.db.get(
             `SELECT id FROM characters WHERE LOWER(name) = LOWER(?) AND LOWER(series) = LOWER(?)`,
             [data.name, data.series]
@@ -312,12 +317,15 @@ export class Kamijs {
         await this.db.run(`INSERT OR IGNORE INTO users (jid, balance, pity_count, has_guaranteed) VALUES (?, 0, 0, 0)`, [userJid]);
         const user = await this.db.get('SELECT * FROM users WHERE jid = ?', [userJid]);
         if (!user || user.balance < PULL_COST) throw new Error('INSUFFICIENT_FUNDS');
+        
         const results = [];
         let p = user.pity_count;
         let luck = user.luck ?? 0;
+        let currentTickets = user.tickets ?? 0;
         let bankAccrued = 0;
         let hitOccurred = false;
         const pulledThisSession = new Set();
+        
         await this.db.run('BEGIN IMMEDIATE');
         try {
             for (let i = 0; i < 10; i++) {
@@ -330,6 +338,7 @@ export class Kamijs {
                 const softRate = p >= 80 ? 0.06 : p >= 60 ? 0.04 : p >= 40 ? 0.025 : HIT_RATE;
                 const effectiveRate = Math.min(softRate + luck, 1);
                 const isHit = (pityHit && !hitOccurred) || Math.random() < effectiveRate;
+                
                 if (isHit) {
                     hitOccurred = true;
                     luck = 0;
@@ -362,19 +371,19 @@ export class Kamijs {
                 } else {
                     luck = Math.min(luck + 0.001, 0.02);
                 }
+                
                 let droppedTicket = false;
                 if (Math.random() < 0.02) {
                     droppedTicket = true;
-                    await this.db.run(`UPDATE users SET tickets = tickets + 1 WHERE jid = ?`, [userJid]);
+                    currentTickets++;
+                    await this.db.run(`UPDATE users SET tickets = ? WHERE jid = ?`, [currentTickets, userJid]);
                     if (sock && chatId) {
-                        const updatedUser = await this.db.get('SELECT tickets FROM users WHERE jid = ?', [userJid]);
-                        const totalTickets = updatedUser?.tickets ?? 1;
                         const notifMsg = [
                             `🎟️ *¡TICKET DE SELECCIÓN OBTENIDO!*`,
                             `━━━━━━━━━━━━━━━━━━━━`,
                             `@${userJid.split('@')[0]} consiguió un Ticket de Selección durante su tirada. 🎉`,
                             ``,
-                            `📦 *Tickets actuales:* ${totalTickets}`,
+                            `📦 *Tickets actuales:* ${currentTickets}`,
                             ``,
                             `_Úsalo con .ticket [Nombre o ID] para intentar capturar al personaje que quieras._`
                         ].join('\n');
@@ -410,6 +419,6 @@ export class Kamijs {
         const where = conditions.length > 0 ? ' WHERE ' + conditions.join(' AND ') : '';
         return await this.db.get(`SELECT c.* FROM characters c${where} ORDER BY RANDOM() LIMIT 1`, params);
     }
-        }
-                        }
-    
+                }
+
+        
