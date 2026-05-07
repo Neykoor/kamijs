@@ -26,7 +26,7 @@ export class Kamijs {
             PRAGMA journal_mode = WAL;
             CREATE TABLE IF NOT EXISTS characters (id TEXT PRIMARY KEY, name TEXT NOT NULL, series TEXT NOT NULL, gender TEXT, booru_tag TEXT, value INTEGER DEFAULT 3000, global_limit INTEGER DEFAULT 15);
             CREATE TABLE IF NOT EXISTS users (jid TEXT PRIMARY KEY, balance INTEGER DEFAULT 0, pity_count INTEGER DEFAULT 0, luck REAL DEFAULT 0, last_active INTEGER DEFAULT 0, has_starter INTEGER DEFAULT 0, tickets INTEGER DEFAULT 0);
-            CREATE TABLE IF NOT EXISTS claims (id INTEGER PRIMARY KEY AUTOINCREMENT, char_id TEXT, owner_jid TEXT, claimed_at INTEGER);
+            CREATE TABLE IF NOT EXISTS claims (id INTEGER PRIMARY KEY AUTOINCREMENT, char_id TEXT, owner_jid TEXT, claimed_at INTEGER, UNIQUE(char_id, owner_jid));
             CREATE TABLE IF NOT EXISTS bank (id INTEGER PRIMARY KEY CHECK (id = 1), balance INTEGER DEFAULT 0);
             CREATE TABLE IF NOT EXISTS market (id INTEGER PRIMARY KEY AUTOINCREMENT, seller_jid TEXT, char_id TEXT, price INTEGER, listed_at INTEGER);
             CREATE TABLE IF NOT EXISTS migrations (version INTEGER PRIMARY KEY);
@@ -51,6 +51,7 @@ export class Kamijs {
 
     async cleanInactiveUsers() {
         const cutoff = Date.now() - 1209600000;
+        await this.db.run("DELETE FROM market WHERE seller_jid IN (SELECT jid FROM users WHERE last_active > 0 AND last_active < ?)", [cutoff]);
         await this.db.run("DELETE FROM claims WHERE owner_jid IN (SELECT jid FROM users WHERE last_active > 0 AND last_active < ?)", [cutoff]);
         await this.db.run("DELETE FROM users WHERE last_active > 0 AND last_active < ?", [cutoff]);
     }
@@ -62,7 +63,7 @@ export class Kamijs {
         
         await this.db.run("BEGIN IMMEDIATE");
         try {
-            if ((await this.db.get("SELECT has_starter FROM users WHERE jid = ?", [userJid])).has_starter) throw new Error("ALREADY_CLAIMED_STARTER");
+            if ((await this.db.get("SELECT has_starter FROM users WHERE jid = ?", [userJid]))?.has_starter) throw new Error("ALREADY_CLAIMED_STARTER");
             const char = await this.db.get("SELECT * FROM characters WHERE id = ? COLLATE NOCASE OR LOWER(name) = LOWER(?)", [charId, charId]);
             if (!char) throw new Error("CHARACTER_NOT_FOUND");
             if (char.global_limit && (await this.db.get("SELECT COUNT(*) as count FROM claims WHERE char_id = ?", [char.id])).count >= char.global_limit) throw new Error("OUT_OF_STOCK");
@@ -104,6 +105,7 @@ export class Kamijs {
     }
 
     async addTickets(jid, amount, sock) {
+        if (!Number.isInteger(amount) || amount === 0) throw new Error("INVALID_AMOUNT");
         const userJid = await LidGuard.clean(sock, jid);
         await this.db.run("INSERT OR IGNORE INTO users (jid) VALUES (?)", [userJid]);
         await this.db.run("UPDATE users SET tickets = tickets + ? WHERE jid = ?", [amount, userJid]);
@@ -112,9 +114,16 @@ export class Kamijs {
     async listMarket(jid, charId, price, sock) {
         if (price <= 0 || price > MAX_MARKET_PRICE) throw new Error("INVALID_PRICE");
         const userJid = await LidGuard.clean(sock, jid);
-        if (!await this.db.get("SELECT * FROM claims WHERE char_id = ? AND owner_jid = ?", [charId, userJid])) throw new Error("CHARACTER_NOT_OWNED");
-        if (await this.db.get("SELECT * FROM market WHERE char_id = ? AND seller_jid = ?", [charId, userJid])) throw new Error("ALREADY_LISTED");
-        await this.db.run("INSERT INTO market (seller_jid, char_id, price, listed_at) VALUES (?, ?, ?, ?)", [userJid, charId, price, Date.now()]);
+        await this.db.run("BEGIN IMMEDIATE");
+        try {
+            if (!await this.db.get("SELECT * FROM claims WHERE char_id = ? AND owner_jid = ?", [charId, userJid])) throw new Error("CHARACTER_NOT_OWNED");
+            if (await this.db.get("SELECT * FROM market WHERE char_id = ? AND seller_jid = ?", [charId, userJid])) throw new Error("ALREADY_LISTED");
+            await this.db.run("INSERT INTO market (seller_jid, char_id, price, listed_at) VALUES (?, ?, ?, ?)", [userJid, charId, price, Date.now()]);
+            await this.db.run("COMMIT");
+        } catch (e) {
+            await this.db.run("ROLLBACK").catch(() => {});
+            throw e;
+        }
     }
 
     async buyFromMarket(jid, marketId, sock) {
@@ -206,6 +215,7 @@ export class Kamijs {
             if (from === to) throw new Error("SELF_TRADE");
             if (await this.db.get("SELECT * FROM claims WHERE char_id = ? AND owner_jid = ?", [charId, to])) throw new Error("RECEIVER_ALREADY_OWNS");
             if ((await this.db.run("UPDATE claims SET owner_jid = ? WHERE char_id = ? AND owner_jid = ?", [to, charId, from])).changes === 0) throw new Error("CHARACTER_NOT_OWNED");
+            await this.db.run("DELETE FROM market WHERE char_id = ? AND seller_jid = ?", [charId, from]);
             await this.db.run("COMMIT");
         } catch (e) {
             await this.db.run("ROLLBACK").catch(() => {});
@@ -266,7 +276,6 @@ export class Kamijs {
                 let droppedTicket = false;
                 if (Math.random() < 0.02) {
                     droppedTicket = true; currentTickets++;
-                    if (sock && chatId) sock.sendMessage(chatId, { text: `🎟️ *¡TICKET OBTENIDO!*\n\n@${userJid.split("@")[0]} consiguió un Ticket de Selección. 🎉\n📦 *Tickets:* ${currentTickets}`, mentions: [userJid] }).catch(() => {});
                 }
                 results.push({ ...(char || {}), isRepeat, repeatCompensation, jackpotBonus, droppedTicket, pity: p, luck: parseFloat(luck.toFixed(4)) });
             }
@@ -276,6 +285,18 @@ export class Kamijs {
             await this.db.run("UPDATE users SET balance = balance - ? + ?, pity_count = ?, luck = ?, tickets = ? WHERE jid = ?", [PULL_COST, jackpotTotal + results.reduce((a, c) => a + (c.repeatCompensation || 0), 0), p, luck, currentTickets, userJid]);
 
             await this.db.run("COMMIT");
+
+            // Enviar notificaciones de tickets DESPUÉS del COMMIT para garantizar consistencia
+            if (sock && chatId) {
+                const ticketsDropped = results.filter(r => r.droppedTicket).length;
+                if (ticketsDropped > 0) {
+                    sock.sendMessage(chatId, {
+                        text: `🎟️ *¡TICKET${ticketsDropped > 1 ? "S" : ""} OBTENIDO${ticketsDropped > 1 ? "S" : ""}!*\n\n@${userJid.split("@")[0]} consiguió ${ticketsDropped} Ticket${ticketsDropped > 1 ? "s" : ""} de Selección. 🎉\n📦 *Tickets:* ${currentTickets}`,
+                        mentions: [userJid]
+                    }).catch(() => {});
+                }
+            }
+
             return results;
         } catch (e) {
             await this.db.run("ROLLBACK").catch(() => {});
