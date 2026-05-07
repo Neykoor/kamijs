@@ -6,7 +6,7 @@ export class ImageProvider {
         if (!tag || typeof tag !== "string") return null;
         
         const cleanTag = tag.replace(/\s+/g, "_").toLowerCase();
-        const query = `${cleanTag} -rating:e`;
+        const query = `${cleanTag} rating:s`;
         
         const cached = this.#cache.get(query);
         if (cached && Date.now() - cached.timestamp < this.#CACHE_TTL) return cached.data;
@@ -23,8 +23,9 @@ export class ImageProvider {
 
             const filtered = posts.filter((post) => {
                 const tags = (post.tags || "").toLowerCase();
-                if (/(sex|naked|nude|nipple|crotch|pubic)/.test(tags)) return false;
-                if (tags.includes("loli") && post.rating === "q") return false;
+                if (/(sex|naked|nude|nipple|crotch|pubic|pussy|penis|vagina|genitalia|areola|cleavage_cutout)/.test(tags)) return false;
+                if (tags.includes("loli") || tags.includes("shota")) return false;
+                if (post.rating !== "s") return false;
                 return true;
             });
             
