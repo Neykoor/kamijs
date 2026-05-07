@@ -37,7 +37,7 @@ export class Kamijs {
             await this.db.run("UPDATE characters SET value = 3000 WHERE value IS NULL");
             if (!(await this.db.all("PRAGMA table_info(users)")).some((c) => c.name === "luck")) await this.db.exec("ALTER TABLE users ADD COLUMN luck REAL DEFAULT 0; ALTER TABLE users ADD COLUMN last_active INTEGER DEFAULT 0; ALTER TABLE users ADD COLUMN has_starter INTEGER DEFAULT 0; ALTER TABLE users ADD COLUMN tickets INTEGER DEFAULT 0;");
             if (!(await this.db.all("PRAGMA table_info(characters)")).some((c) => c.name === "global_limit")) await this.db.exec("ALTER TABLE characters ADD COLUMN global_limit INTEGER DEFAULT 15; UPDATE characters SET global_limit = 15 WHERE global_limit IS NULL;");
-            if ((await this.db.all("PRAGMA table_info(claims)")).some((c) => c.name === "group_id")) await this.db.exec("CREATE TABLE claims_new (id INTEGER PRIMARY KEY AUTOINCREMENT, char_id TEXT, owner_jid TEXT, claimed_at INTEGER); INSERT INTO claims_new (char_id, owner_jid, claimed_at) SELECT char_id, owner_jid, MAX(claimed_at) FROM claims GROUP BY char_id, owner_jid; DROP TABLE claims; ALTER TABLE claims_new RENAME TO claims;");
+            if ((await this.db.all("PRAGMA table_info(claims)")).some((c) => c.name === "group_id")) await this.db.exec("CREATE TABLE claims_new (id INTEGER PRIMARY KEY AUTOINCREMENT, char_id TEXT, owner_jid TEXT, claimed_at INTEGER, UNIQUE(char_id, owner_jid)); INSERT INTO claims_new (char_id, owner_jid, claimed_at) SELECT char_id, owner_jid, MAX(claimed_at) FROM claims GROUP BY char_id, owner_jid; DROP TABLE claims; ALTER TABLE claims_new RENAME TO claims;");
             await this.db.run("INSERT OR IGNORE INTO migrations (version) VALUES (1)");
         }
     }
@@ -286,7 +286,6 @@ export class Kamijs {
 
             await this.db.run("COMMIT");
 
-            // Enviar notificaciones de tickets DESPUÉS del COMMIT para garantizar consistencia
             if (sock && chatId) {
                 const ticketsDropped = results.filter(r => r.droppedTicket).length;
                 if (ticketsDropped > 0) {
@@ -314,5 +313,4 @@ export class Kamijs {
         if (!candidates.length) return null;
         return await this.db.get("SELECT * FROM characters WHERE id = ?", [candidates[Math.floor(Math.random() * candidates.length)].id]);
     }
-            }
-
+        }
