@@ -9,7 +9,8 @@ export class LidGuard {
             return LidGuard.#normalize(raw);
         }
         try {
-            return (await sock.lid?.resolve(raw))?.toLowerCase() || LidGuard.#normalize(raw);
+            const resolved = (await sock.lid?.resolve(raw))?.toLowerCase();
+            return (resolved && resolved.includes("@")) ? resolved : LidGuard.#normalize(raw);
         } catch {
             return LidGuard.#normalize(raw);
         }
