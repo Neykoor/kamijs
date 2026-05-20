@@ -18,12 +18,7 @@ export class ImageProvider {
         }
     }
 
-    static async #fetchPosts(tag, rating = "s") {
-        if (!tag || typeof tag !== "string") return null;
-
-        const cleanTag = tag.replace(/\s+/g, "_").toLowerCase();
-        const query = `${cleanTag} rating:${rating}`;
-
+    static async #fetchPosts(query) {
         const cached = this.#cache.get(query);
         if (cached && Date.now() - cached.timestamp < this.#CACHE_TTL) return cached.data;
 
@@ -49,14 +44,17 @@ export class ImageProvider {
     static async getRandomUrl(tag) {
         try {
             if (!tag || typeof tag !== "string") return null;
-            const clean = tag.replace(/\s+/g, "_").toLowerCase();
+
+            const clean = tag.trim().toLowerCase().replace(/\s+/g, "_");
             const base  = clean.includes("_(") ? clean.split("_(")[0] : null;
 
             const data =
-                await this.#fetchPosts(clean, "s") ||
-                await this.#fetchPosts(clean, "q") ||
-                (base ? await this.#fetchPosts(base, "s") : null) ||
-                (base ? await this.#fetchPosts(base, "q") : null);
+                await this.#fetchPosts(`${clean} -rating:explicit`) ||
+                await this.#fetchPosts(`${clean} rating:s`) ||
+                await this.#fetchPosts(`${clean} rating:q`) ||
+                (base ? await this.#fetchPosts(`${base} -rating:explicit`) : null) ||
+                (base ? await this.#fetchPosts(`${base} rating:s`)         : null) ||
+                (base ? await this.#fetchPosts(`${base} rating:q`)         : null);
 
             if (!data?.length) return null;
             const post = data[Math.floor(Math.random() * data.length)];
