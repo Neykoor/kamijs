@@ -111,8 +111,6 @@ export class Kamijs {
         }
     }
 
-    // FIX: query separada — primero busca por ID exacto, luego por nombre
-    // antes el OR ambiguo podía matchear un personaje incorrecto
     async #findCharacter(charId) {
         return (
             await this.db.get("SELECT * FROM characters WHERE id = ?", [charId]) ??
@@ -156,7 +154,6 @@ export class Kamijs {
             if (!user)             throw new Error("USER_NOT_FOUND");
             if (user.tickets <= 0) throw new Error("NO_TICKETS");
 
-            // FIX: query separada — primero ID exacto, luego nombre
             char = await this.#findCharacter(charId);
             if (!char) throw new Error("CHARACTER_NOT_FOUND");
 
@@ -240,9 +237,9 @@ export class Kamijs {
             await this.db.run("ROLLBACK").catch(() => {});
             throw e;
         }
-    }
+        }
 
-    async addCharacter(data) {
+            async addCharacter(data) {
         if (!data.name || !data.series) throw new Error("MISSING_REQUIRED_FIELDS");
         if (await this.db.get(
             "SELECT 1 FROM characters WHERE LOWER(name) = LOWER(?) AND LOWER(series) = LOWER(?)",
@@ -314,8 +311,6 @@ export class Kamijs {
         const from = await LidGuard.clean(sock, fromJid);
         const to   = await LidGuard.clean(sock, toJid);
         await this.updatePresence(sock, fromJid);
-        // FIX: registrar actividad del receptor también para que no sea
-        // eliminado por cleanInactiveUsers al recibir un personaje
         await this.updatePresence(sock, toJid);
         await this.db.run("BEGIN IMMEDIATE");
         try {
@@ -332,8 +327,6 @@ export class Kamijs {
         }
     }
 
-    // FIX: global_owners ahora devuelve solo el número de teléfono (sin @s.whatsapp.net)
-    // del dueño actual del personaje, no el JID crudo
     async getSeriesCharacters(series) {
         return await this.db.all(`
             SELECT c.id, c.name, c.gender, c.series, c.global_limit,
@@ -366,23 +359,27 @@ export class Kamijs {
             let currentBank = (await this.db.get("SELECT balance FROM bank WHERE id = 1"))?.balance ?? 0;
             const claimTimestamp = Date.now();
 
-            const newPool = await this.db.all(`
-                SELECT c.* FROM characters c
+            const poolData = await this.db.all(`
+                SELECT c.*,
+                       MAX(CASE WHEN cl.owner_jid = ? THEN 1 ELSE 0 END) as owned_by_me,
+                       COUNT(cl.id) as total_claims,
+                       (SELECT owner_jid FROM claims WHERE char_id = c.id AND owner_jid != ? LIMIT 1) as other_owner
+                FROM characters c
                 LEFT JOIN claims cl ON cl.char_id = c.id
-                WHERE NOT EXISTS (SELECT 1 FROM claims WHERE char_id = c.id AND owner_jid = ?)
                 GROUP BY c.id
-                HAVING c.global_limit IS NULL OR COUNT(cl.id) < c.global_limit
-            `, [userJid]);
+            `, [userJid, userJid]);
 
-            const repeatPool = await this.db.all(`
-                SELECT c.* FROM characters c
-                JOIN claims cl ON cl.char_id = c.id AND cl.owner_jid = ?
-            `, [userJid]);
+            const allCandidates = poolData.map(c => {
+                const { owned_by_me, total_claims, other_owner, ...charData } = c;
 
-            const allCandidates = [
-                ...newPool.map(c => ({ ...c, isRepeat: false })),
-                ...repeatPool.map(c => ({ ...c, isRepeat: true }))
-            ];
+                if (owned_by_me) {
+                    return { ...charData, isRepeat: true, isClaimedByOther: false, owner_jid: userJid };
+                } else if (charData.global_limit !== null && total_claims >= charData.global_limit) {
+                    return { ...charData, isRepeat: true, isClaimedByOther: true, owner_jid: other_owner };
+                } else {
+                    return { ...charData, isRepeat: false, isClaimedByOther: false };
+                }
+            });
 
             if (allCandidates.length === 0) throw new Error("EMPTY_POOL");
 
@@ -396,8 +393,6 @@ export class Kamijs {
                 );
 
                 if (p >= PITY_LIMIT_RW || Math.random() < effectiveRate) {
-                    // FIX: verificar available ANTES de resetear luck/pity
-                    // para no perder el estado si el pool se agotó en esta sesión
                     const available = allCandidates.filter(c => !pulledThisSession.has(c.id));
                     if (!available.length) throw new Error("EMPTY_POOL");
 
@@ -420,7 +415,6 @@ export class Kamijs {
                     luck = Math.min(luck + 0.001, 0.02);
                 }
 
-                // FIX: ticket solo puede dropear en slots donde salió un personaje
                 const droppedTicket = char !== null && Math.random() < 0.02;
                 if (droppedTicket) currentTickets++;
 
