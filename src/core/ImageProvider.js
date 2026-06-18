@@ -2,13 +2,11 @@ export class ImageProvider {
     static #cache = new Map();
     static #CACHE_TTL = 300000;
 
-    static #BANNED_TAGS = /(sex|naked|nude|nipple|crotch|pubic|pussy|penis|vagina|genitalia|areola|cleavage_cutout|cum|bottomless|topless|undressing)/;
+    
+   static #BANNED_TAGS = /(sex|naked|nude|nipple|crotch|pubic|pussy|penis|vagina|genitalia|areola|cleavage_cutout|cum|bottomless|topless|undressing|loli|shota)/;
 
     static #isSafe(post) {
-        const tags = (post.tags || "").toLowerCase();
-        if (this.#BANNED_TAGS.test(tags)) return false;
-        if (tags.includes("loli") || tags.includes("shota")) return false;
-        return true;
+        return !this.#BANNED_TAGS.test((post.tags || "").toLowerCase());
     }
 
     static #pruneCache() {
@@ -41,6 +39,19 @@ export class ImageProvider {
         }
     }
 
+        static async #fetchBestFor(tagExpr) {
+        const queries = [
+            `${tagExpr} -rating:explicit`,
+            `${tagExpr} rating:s`,
+            `${tagExpr} rating:q`,
+        ];
+        const results = await Promise.allSettled(queries.map(q => this.#fetchPosts(q)));
+        for (const r of results) {
+            if (r.status === "fulfilled" && r.value?.length) return r.value;
+        }
+        return null;
+    }
+
     static async getRandomUrl(tag) {
         try {
             if (!tag || typeof tag !== "string") return null;
@@ -48,15 +59,14 @@ export class ImageProvider {
             const clean = tag.trim().toLowerCase().replace(/\s+/g, "_");
             const base  = clean.includes("_(") ? clean.split("_(")[0] : null;
 
-            const data =
-                await this.#fetchPosts(`${clean} -rating:explicit`) ||
-                await this.#fetchPosts(`${clean} rating:s`) ||
-                await this.#fetchPosts(`${clean} rating:q`) ||
-                (base ? await this.#fetchPosts(`${base} -rating:explicit`) : null) ||
-                (base ? await this.#fetchPosts(`${base} rating:s`)         : null) ||
-                (base ? await this.#fetchPosts(`${base} rating:q`)         : null);
+                const [dataFull, dataBase] = await Promise.all([
+                this.#fetchBestFor(clean),
+                base ? this.#fetchBestFor(base) : Promise.resolve(null),
+            ]);
 
+            const data = dataFull ?? dataBase;
             if (!data?.length) return null;
+
             const post = data[Math.floor(Math.random() * data.length)];
             return post.sample_url || post.file_url || post.jpeg_url || null;
         } catch {
