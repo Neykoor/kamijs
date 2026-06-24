@@ -3,7 +3,7 @@ export class ImageProvider {
     static #inflight = new Map();
     static #CACHE_TTL = 300_000;
 
-    static #BANNED_TAGS = /(sex|naked|nude|nipple|crotch|pubic|pussy|penis|vagina|genitalia|areola|cleavage_cutout|cum|bottomless|topless|undressing|loli|shota)/;
+    static #BANNED_TAGS = /(loli|shota|cum|penis|vagina|pubic|genitalia)/;
 
     static #isSafe(post) {
         return !this.#BANNED_TAGS.test((post.tags || "").toLowerCase());
@@ -67,7 +67,7 @@ export class ImageProvider {
 
             const base = clean.includes("_(")
                 ? clean.split("_(")[0]
-                : (clean.includes("_") ? clean.split("_")[0] : null);
+                : null;
 
             const [dataFull, dataBase] = await Promise.all([
                 this.#fetchBestFor(clean),
