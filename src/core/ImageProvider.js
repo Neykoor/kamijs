@@ -1,6 +1,6 @@
 export class ImageProvider {
     static #cache    = new Map();
-    static #inflight = new Map();   // deduplicación de fetches en vuelo
+    static #inflight = new Map();   
     static #CACHE_TTL = 300_000;
 
     static #BANNED_TAGS = /(sex|naked|nude|nipple|crotch|pubic|pussy|penis|vagina|genitalia|areola|cleavage_cutout|cum|bottomless|topless|undressing|loli|shota)/;
@@ -16,10 +16,7 @@ export class ImageProvider {
         }
     }
 
-    /**
-     * Fetch con deduplicación: si ya hay un fetch en vuelo para la misma
-     * query, devuelve la misma Promise en lugar de abrir otra conexión.
-     */
+    
     static async #fetchPosts(query) {
         const cached = this.#cache.get(query);
         if (cached && Date.now() - cached.timestamp < this.#CACHE_TTL) return cached.data;
@@ -53,12 +50,7 @@ export class ImageProvider {
         return promise;
     }
 
-    /**
-     * Estrategia waterfall con early-exit:
-     * intenta primero `-rating:explicit` (mejor calidad), y solo escala
-     * a las queries de fallback si no hay resultados — evita 2 fetches
-     * innecesarios en el caso mayoritario donde el primer intento funciona.
-     */
+    
     static async #fetchBestFor(tagExpr) {
         const queries = [
             `${tagExpr} -rating:explicit`,
