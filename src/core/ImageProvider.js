@@ -1,6 +1,6 @@
 export class ImageProvider {
     static #cache    = new Map();
-    static #inflight = new Map();   
+    static #inflight = new Map();
     static #CACHE_TTL = 300_000;
 
     static #BANNED_TAGS = /(sex|naked|nude|nipple|crotch|pubic|pussy|penis|vagina|genitalia|areola|cleavage_cutout|cum|bottomless|topless|undressing|loli|shota)/;
@@ -16,19 +16,17 @@ export class ImageProvider {
         }
     }
 
-    
     static async #fetchPosts(query) {
         const cached = this.#cache.get(query);
         if (cached && Date.now() - cached.timestamp < this.#CACHE_TTL) return cached.data;
 
-        // Reusar fetch en vuelo si existe
         if (this.#inflight.has(query)) return this.#inflight.get(query);
 
         const promise = (async () => {
             try {
                 const res = await fetch(
                     `https://yande.re/post.json?tags=${encodeURIComponent(query)}&limit=100`,
-                    { signal: AbortSignal.timeout(8000), headers: { "User-Agent": "Mozilla/5.0" } }
+                    { signal: AbortSignal.timeout(4000), headers: { "User-Agent": "Mozilla/5.0" } }
                 );
                 if (!res.ok) return null;
 
@@ -50,15 +48,15 @@ export class ImageProvider {
         return promise;
     }
 
-    
     static async #fetchBestFor(tagExpr) {
         const queries = [
             `${tagExpr} -rating:explicit`,
             `${tagExpr} rating:s`,
             `${tagExpr} rating:q`,
         ];
-        for (const q of queries) {
-            const data = await this.#fetchPosts(q);
+
+        const results = await Promise.all(queries.map(q => this.#fetchPosts(q)));
+        for (const data of results) {
             if (data?.length) return data;
         }
         return null;
@@ -71,22 +69,16 @@ export class ImageProvider {
             const clean = tag.trim().toLowerCase().replace(/\s+/g, "_");
             const base  = clean.includes("_(") ? clean.split("_(")[0] : null;
 
-            // Intentar con el tag completo primero; solo si falla probar el base
-            const dataFull = await this.#fetchBestFor(clean);
-            if (dataFull?.length) {
-                const post = dataFull[Math.floor(Math.random() * dataFull.length)];
-                return post.sample_url || post.file_url || post.jpeg_url || null;
-            }
+            const [dataFull, dataBase] = await Promise.all([
+                this.#fetchBestFor(clean),
+                base ? this.#fetchBestFor(base) : Promise.resolve(null),
+            ]);
 
-            if (base) {
-                const dataBase = await this.#fetchBestFor(base);
-                if (dataBase?.length) {
-                    const post = dataBase[Math.floor(Math.random() * dataBase.length)];
-                    return post.sample_url || post.file_url || post.jpeg_url || null;
-                }
-            }
+            const data = dataFull?.length ? dataFull : dataBase;
+            if (!data?.length) return null;
 
-            return null;
+            const post = data[Math.floor(Math.random() * data.length)];
+            return post.sample_url || post.file_url || post.jpeg_url || null;
         } catch {
             return null;
         }
