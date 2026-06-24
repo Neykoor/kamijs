@@ -50,16 +50,13 @@ export class ImageProvider {
 
     static async #fetchBestFor(tagExpr) {
         const queries = [
-            `${tagExpr} -rating:explicit`,
             `${tagExpr} rating:s`,
             `${tagExpr} rating:q`,
         ];
 
         const results = await Promise.all(queries.map(q => this.#fetchPosts(q)));
-        for (const data of results) {
-            if (data?.length) return data;
-        }
-        return null;
+        const merged = results.flat().filter(Boolean);
+        return merged.length ? merged : null;
     }
 
     static async getRandomUrl(tag) {
@@ -67,14 +64,26 @@ export class ImageProvider {
             if (!tag || typeof tag !== "string") return null;
 
             const clean = tag.trim().toLowerCase().replace(/\s+/g, "_");
-            const base  = clean.includes("_(") ? clean.split("_(")[0] : null;
+
+            const base = clean.includes("_(")
+                ? clean.split("_(")[0]
+                : (clean.includes("_") ? clean.split("_")[0] : null);
 
             const [dataFull, dataBase] = await Promise.all([
                 this.#fetchBestFor(clean),
                 base ? this.#fetchBestFor(base) : Promise.resolve(null),
             ]);
 
-            const data = dataFull?.length ? dataFull : dataBase;
+            const MIN_POOL = 3;
+            let data;
+            if (dataFull?.length >= MIN_POOL) {
+                data = dataFull;
+            } else if (dataFull?.length) {
+                data = dataBase?.length ? [...dataFull, ...dataBase] : dataFull;
+            } else {
+                data = dataBase;
+            }
+
             if (!data?.length) return null;
 
             const post = data[Math.floor(Math.random() * data.length)];
