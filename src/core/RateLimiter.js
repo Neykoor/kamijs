@@ -29,7 +29,7 @@ export class RateLimiter {
         if (now - this.#lastSweep < this.#sweepEvery) return;
         this.#lastSweep = now;
         for (const [key, lastHit] of this.#lastHits) {
-            const action = key.slice(0, key.lastIndexOf(":"));
+            const action = key.slice(0, key.indexOf(":"));
             const cd = this.#cooldowns[action] ?? 0;
             if (now - lastHit >= cd) this.#lastHits.delete(key);
         }
