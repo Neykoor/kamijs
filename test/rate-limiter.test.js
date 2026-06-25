@@ -86,4 +86,14 @@ describe("RateLimiter", () => {
         rl.hit("pull10", "jid1");
         assert.equal(rl.check("pull10", "jid1").allowed, true);
     });
+
+    test("el sweep respeta el cooldown con JIDs que contienen ':' (JIDs tipo lid)", async () => {
+        const rl = new RateLimiter({ pull10: 5000 }, { sweepEveryMs: 10 });
+        const lidJid = "123456789:12@lid";
+        rl.hit("pull10", lidJid);
+        
+        await new Promise(resolve => setTimeout(resolve, 20));
+        rl.check("otraAccion", "otroJid");
+                assert.equal(rl.check("pull10", lidJid).allowed, false);
+    });
 });
