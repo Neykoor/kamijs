@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-5.4.0-blue.svg" alt="version" />
+  <img src="https://img.shields.io/badge/version-5.5.0-blue.svg" alt="version" />
   <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="license" />
   <img src="https://img.shields.io/badge/node-%3E%3D18.0.0-339933.svg" alt="node" />
 </p>
@@ -27,7 +27,7 @@
 - 🛒 **Mercado (marketplace)** paginado: listar, comprar y des-listar personajes entre usuarios.
 - 🔁 **Intercambios (trade)** directos entre dos usuarios.
 - 🎟️ **Sistema de tickets** con tasa de éxito configurable (por defecto 30%).
-- 🖼️ **Proveedor de imágenes** integrado (yande.re) con filtro de contenido y caché en memoria con auto-limpieza (TTL de 5 min).
+- 🖼️ **Proveedor de imágenes** integrado (yande.re) con filtro de contenido (rating + tags prohibidos), detección de género por tags, fallback al tag base cuando hay pocos resultados, deduplicación de peticiones concurrentes (`#inflight`) y caché en memoria con auto-limpieza (TTL de 5 min).
 - 🗄️ **Migraciones automáticas** de base de datos al iniciar.
 - 🧹 **Limpieza de usuarios inactivos** que devuelve su saldo al banco en vez de borrarlo.
 - 📊 **Seguimiento de progreso genver** (`getGenverProgress` / `setGenverProgress` / `resetGenverProgress`).
@@ -198,7 +198,7 @@ También puedes acceder al limitador directamente vía `kami.rateLimiter` (méto
 
 > ⚠️ **Cambio importante (v5.1.0):** el orden de parámetros de `withdrawBank` cambió de `(amount, toJid, sock)` a `(toJid, amount, sock)`.
 
-> `ImageProvider.getRandomUrl(tag)` también se exporta por separado si necesitas obtener una imagen de un personaje de forma manual. `LOG_LEVELS` también se exporta para consultar los valores numéricos de severidad.
+> `ImageProvider.getRandomUrl(tag)` también se exporta por separado si necesitas obtener una imagen de un personaje de forma manual. `ImageProvider.getRandomPost(tag)` devuelve el post completo (`id`, `url`, `file_url`, `sample_url`, `jpeg_url`, `tags`, `rating`, `score`, `author`, `source`, `width`, `height`, `gender`) en lugar de solo la URL. `ImageProvider.clearCache()` vacía la caché y las peticiones en curso manualmente. `LOG_LEVELS` también se exporta para consultar los valores numéricos de severidad.
 
 ## ✏️ CRUD de personajes
 
@@ -278,6 +278,13 @@ kamijs/
 ```
 
 ## 📋 Changelog
+
+### v5.5.0
+- **Reescritura (ImageProvider):** arquitectura alineada con `konachan-scraper` — pool de resultados con fallback automático al tag base (ej. `rem_(re:zero)` → `rem` si el tag completo trae menos de 3 resultados), en lugar del waterfall con early-exit anterior.
+- **Mejora (ImageProvider):** lista de tags prohibidos ampliada con `child`, `toddler` e `infant`.
+- **Mejora (ImageProvider):** rating permitido ahora se valida contra un `Set` explícito (`s`, `q`) en vez de inferirse solo de los tags.
+- **Nuevo (ImageProvider):** `getRandomPost(tag)` — devuelve el post completo con metadata (id, urls, tags, rating, score, autor, fuente, dimensiones) y género detectado por tags (`female` / `male` / `mixed` / `unknown`).
+- **Nuevo (ImageProvider):** `clearCache()` — permite vaciar la caché y las peticiones en curso manualmente.
 
 ### v5.4.0
 - **Perf (ImageProvider):** añadido mapa `#inflight` para deduplicar fetches concurrentes al mismo tag — si 10 personajes del mismo pull comparten tag, se hace **1 sola** petición HTTP en lugar de 10.
