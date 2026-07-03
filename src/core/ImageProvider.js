@@ -8,7 +8,7 @@ export class ImageProvider {
 
     static #BASE = "https://yande.re";
 
-    static #BANNED_TAGS    = /(loli|shota|child|toddler|infant|cum|penis|vagina|pubic|genitalia)/;
+    static #BANNED_TAGS    = /(loli|shota|child|toddler|infant|cum|penis|vagina|pubic|genitalia|nude|naked|topless|bottomless|sex|nipples|pussy|anus|fellatio|paizuri|masturbation|fingering|areola|breast_grab|panty_pull|see_through|nsfw|explicit)/;
     static #ALLOWED_RATINGS = new Set(["s", "q"]);
 
     static #FEMALE_TAGS = /\b(1girl|2girls|3girls|4girls|5girls|6\+girls|multiple_girls)\b/;
