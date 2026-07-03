@@ -3,7 +3,7 @@ export class ImageProvider {
     static #inflight = new Map();
 
     static #CACHE_TTL     = 5 * 60 * 1000;
-    static #FETCH_TIMEOUT = 6_000;
+    static #FETCH_TIMEOUT = 8_000;
     static #LIMIT         = 100;
 
     static #BASE = "https://yande.re";
@@ -117,7 +117,8 @@ export class ImageProvider {
     static async getRandomUrl(tag) {
         try {
             if (!tag || typeof tag !== "string") return null;
-            const pool = await this.#resolvePool(tag);
+            let pool = await this.#resolvePool(tag);
+            if (!pool?.length) pool = await this.#resolvePool(tag);
             if (!pool?.length) return null;
             const post = pool[Math.floor(Math.random() * pool.length)];
             return post.sample_url || post.jpeg_url || post.file_url || null;
