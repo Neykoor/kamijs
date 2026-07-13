@@ -1,5 +1,5 @@
 {
-  "name": "kamijs",
+  "name": "@neykoor/kamijs",
   "version": "5.4.0",
   "description": "Motor de gacha de personajes para bots de WhatsApp construidos sobre Baileys.",
   "type": "module",
