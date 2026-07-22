@@ -1,6 +1,6 @@
 {
   "name": "@neykoor/kamijs",
-  "version": "5.4.0",
+  "version": "5.4.1",
   "description": "Motor de gacha de personajes para bots de WhatsApp construidos sobre Baileys.",
   "type": "module",
   "main": "src/index.js",
@@ -9,12 +9,9 @@
   "scripts": {
     "test": "node --test test/"
   },
-  "dependencies": {
-    "sqlite": "^5.1.1",
-    "sqlite3": "^5.1.7"
-  },
+  "dependencies": {},
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.5.0"
   },
   "license": "MIT",
   "author": "Neykoor",
